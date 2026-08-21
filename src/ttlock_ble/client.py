@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Self
 from . import commands as cmd
 from .ble import BleTransport, KeepAlive
 from .ble.constants import DEFAULT_KEEP_ALIVE_SECONDS
-from .constants import KeyboardPwdType, LockState
+from .constants import KeyboardPwdType, LockState, PassageModeOperation
 from .crypto import aes_decrypt, hex_key_to_bytes
 from .exceptions import TTLockError
 from .models import LockEvent, LogEntry
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from bleak import BleakClient
     from bleak.backends.device import BLEDevice
 
-    from .models import VirtualKey
+    from .models import LockCapabilities, PassageMode, VirtualKey
 
     DisconnectedCallback = Callable[[BleakClient], None]
     EventListener = Callable[[LockEvent], None]
@@ -284,6 +284,66 @@ class TTLockClient:
             await self._auto_lock_exchange(cmd.payload_auto_lock_set(seconds))
         log.info("auto-lock delay set to %ds", seconds)
 
+    async def get_capabilities(self) -> LockCapabilities:
+        """Read the lock's advertised management-feature bit field."""
+        async with self._command_lock:
+            resp = await self._transport.exchange(
+                self._frame(cmd.CMD_SEARCH_DEVICE_FEATURE, cmd.payload_feature_query())
+            )
+            plain = self._decrypt_response(resp, "device_features")
+            try:
+                capabilities, _battery = cmd.parse_feature_response(plain)
+            except (RuntimeError, ValueError) as error:
+                raise TTLockError(f"Failed to read device features: {error}") from error
+        log.info("Device feature mask = 0x%x", capabilities.feature_mask)
+        return capabilities
+
+    async def get_passage_modes(self) -> list[PassageMode]:
+        """Read every native passage-mode schedule stored by the lock."""
+        async with self._command_lock:
+            schedules: list[PassageMode] = []
+            sequence = 0
+            seen_sequences = {sequence}
+            while True:
+                resp = await self._transport.exchange(
+                    self._frame(
+                        cmd.CMD_CONFIGURE_PASSAGE_MODE,
+                        cmd.payload_passage_mode_query(sequence),
+                    )
+                )
+                plain = self._decrypt_response(resp, "get_passage_modes")
+                try:
+                    page, next_sequence = cmd.parse_passage_mode_response(plain)
+                except (RuntimeError, ValueError) as error:
+                    raise TTLockError(f"Failed to read passage modes: {error}") from error
+                schedules.extend(page)
+                if next_sequence == 0 or next_sequence in seen_sequences:
+                    break
+                seen_sequences.add(next_sequence)
+                sequence = next_sequence
+        log.info("Fetched %d passage-mode schedule(s)", len(schedules))
+        return schedules
+
+    async def add_passage_mode(self, schedule: PassageMode) -> None:
+        """Add one native passage-mode schedule."""
+        await self._change_passage_mode(PassageModeOperation.ADD, schedule)
+
+    async def delete_passage_mode(self, schedule: PassageMode) -> None:
+        """Delete one exact native passage-mode schedule."""
+        await self._change_passage_mode(PassageModeOperation.DELETE, schedule)
+
+    async def clear_passage_modes(self) -> None:
+        """Remove every native passage-mode schedule from the lock."""
+        async with self._command_lock:
+            resp = await self._transport.exchange(
+                self._frame(
+                    cmd.CMD_CONFIGURE_PASSAGE_MODE,
+                    cmd.payload_passage_mode_clear(),
+                )
+            )
+            plain = self._decrypt_response(resp, "clear_passage_modes")
+            self._require_success(plain, "clear passage modes")
+
     async def add_passcode(
         self,
         code: str,
@@ -360,7 +420,6 @@ class TTLockClient:
                     self._frame(cmd.CMD_GET_OPERATE_LOG, cmd.payload_operate_log_request(next_seq))
                 )
                 plain = self._decrypt_response(resp, "operate_log")
-                log.debug("operate_log response plaintext: %s", plain.hex())
                 try:
                     page, last_seq = cmd.parse_operate_log_response(plain)
                 except ValueError as error:
@@ -489,6 +548,26 @@ class TTLockClient:
         plain = self._decrypt_response(resp, label)
         self._require_success(plain, label)
 
+    async def _change_passage_mode(
+        self,
+        operation: PassageModeOperation,
+        schedule: PassageMode,
+    ) -> None:
+        async with self._command_lock:
+            resp = await self._transport.exchange(
+                self._frame(
+                    cmd.CMD_CONFIGURE_PASSAGE_MODE,
+                    cmd.payload_passage_mode_change(operation, schedule),
+                )
+            )
+            label = (
+                "add passage mode"
+                if operation is PassageModeOperation.ADD
+                else "delete passage mode"
+            )
+            plain = self._decrypt_response(resp, label)
+            self._require_success(plain, label)
+
     async def _control_lock(self, opcode: int, ps: int, label: str) -> None:
         resp = await self._transport.exchange(
             self._frame(opcode, cmd.payload_unlock(ps, self.key.unlockKey))
@@ -498,15 +577,12 @@ class TTLockClient:
 
     def _require_success(self, plain: bytes, label: str) -> None:
         """Log the envelope and raise unless the lock reported success."""
-        echo, status, data = self._parse_response_envelope(plain, label)
+        echo, status, _data = self._parse_response_envelope(plain, label)
         log.info(
-            "%s response: cmd_echo=0x%02x status=%d data=%s",
+            "%s response: cmd_echo=0x%02x status=%d",
             label,
             echo,
             status,
-            data.hex(),
         )
         if status != cmd.RESPONSE_SUCCESS:
-            raise TTLockError(
-                f"Failed to {label}: lock rejected with status={status:#x}, error={data.hex()}"
-            )
+            raise TTLockError(f"Failed to {label}: lock rejected with status={status:#x}")

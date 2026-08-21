@@ -8,7 +8,7 @@ from .encoding import decimal_time_bytes
 
 def _check_passcode(code: str) -> None:
     if not (4 <= len(code) <= 9) or not code.isdigit():
-        raise ValueError(f"keyboard passcode must be 4-9 digits, got {code!r}")
+        raise ValueError("keyboard passcode must be 4-9 digits")
 
 
 def payload_passcode_add(

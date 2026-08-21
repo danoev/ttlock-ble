@@ -13,27 +13,49 @@ Public API:
     CloudError     — raised by `TTLockCloud` on a non-success HTTP response
 
 IntEnums:
-    AutoLockOperate, KeyboardPwdType, LockState, LogOperate, PwdOperateType
+    AutoLockOperate, KeyboardPwdType, LockState, LogOperate, PassageModeOperation,
+    PassageModeType, PwdOperateType
 """
 
 from __future__ import annotations
 
 from .client import TTLockClient
 from .cloud import TTLockCloud
-from .constants import AutoLockOperate, KeyboardPwdType, LockState, LogOperate, PwdOperateType
+from .constants import (
+    AutoLockOperate,
+    KeyboardPwdType,
+    LockState,
+    LogOperate,
+    PassageModeOperation,
+    PassageModeType,
+    PwdOperateType,
+)
 from .exceptions import CloudError, TTLockError
-from .models import LockAdvertisement, LockEvent, LockVersion, LogEntry, SiteInfo, VirtualKey
+from .models import (
+    LockAdvertisement,
+    LockCapabilities,
+    LockEvent,
+    LockVersion,
+    LogEntry,
+    PassageMode,
+    SiteInfo,
+    VirtualKey,
+)
 
 __all__ = [
     "AutoLockOperate",
     "CloudError",
     "KeyboardPwdType",
     "LockAdvertisement",
+    "LockCapabilities",
     "LockEvent",
     "LockState",
     "LockVersion",
     "LogEntry",
     "LogOperate",
+    "PassageMode",
+    "PassageModeOperation",
+    "PassageModeType",
     "PwdOperateType",
     "SiteInfo",
     "TTLockClient",
