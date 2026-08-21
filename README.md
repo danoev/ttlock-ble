@@ -153,6 +153,9 @@ Everything below is re-exported from the top-level `ttlock_ble` package.
 | `query_state()` | `(LockState \| None, battery_percent \| None)` |
 | `get_auto_lock_time()` / `set_auto_lock_time(seconds)` | Read / set the auto-lock delay |
 | `add_passcode(...)` / `delete_passcode(...)` / `clear_passcodes()` | Manage keypad passcodes |
+| `get_capabilities()` | Decode the device-feature bit field as `LockCapabilities` |
+| `get_passage_modes()` | Read the lock's native passage-mode schedules |
+| `add_passage_mode(...)` / `delete_passage_mode(...)` / `clear_passage_modes()` | Manage native passage schedules |
 | `get_operation_log()` | Paginated on-device operation log (`list[LogEntry]`) |
 | `get_lock_time()` / `calibrate_time()` / `sync_time()` | Read / align the lock's clock |
 | `add_event_listener(cb)` / `remove_event_listener(cb)` | Subscribe to `LockEvent` pushes |
@@ -171,9 +174,16 @@ Everything below is re-exported from the top-level `ttlock_ble` package.
 
 ### Models & enums
 
-- **Models:** `VirtualKey`, `LockVersion`, `SiteInfo`, `LockAdvertisement`, `LockEvent`, `LogEntry`
-- **Enums:** `LockState`, `AutoLockOperate`, `KeyboardPwdType`, `LogOperate`, `PwdOperateType`
+- **Models:** `VirtualKey`, `LockVersion`, `SiteInfo`, `LockAdvertisement`,
+  `LockCapabilities`, `LockEvent`, `LogEntry`, `PassageMode`
+- **Enums:** `LockState`, `AutoLockOperate`, `KeyboardPwdType`, `LogOperate`,
+  `PassageModeOperation`, `PassageModeType`, `PwdOperateType`
 - **Exceptions:** `TTLockError` (BLE / protocol), `CloudError` (cloud HTTP)
+
+Passage records use the lock's local wall clock and minute precision. TTLock is
+a hardware family with firmware-specific feature sets: call `get_capabilities()`
+first, fail safely on a rejected command, and validate add/query/delete on the
+physical model before relying on a passage schedule for access control.
 
 ## Home Assistant
 
