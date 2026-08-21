@@ -10,6 +10,9 @@ from tests.conftest import make_virtual_key
 from ttlock_ble import (
     LockEvent,
     LockState,
+    PassageMode,
+    PassageModeOperation,
+    PassageModeType,
     TTLockClient,
     TTLockError,
     VirtualKey,
@@ -193,6 +196,20 @@ def _operate_log_response_frame(key: VirtualKey, sequence: int, records: list[by
     )
 
 
+def _encrypted_response_frame(key: VirtualKey, command: int, plaintext: bytes) -> Frame:
+    """Build one encrypted lock response for a management command."""
+    return Frame(
+        protocol_type=key.lockVersion.protocolType,
+        sub_version=key.lockVersion.protocolVersion,
+        scene=key.lockVersion.scene,
+        group_id=key.lockVersion.groupId,
+        sub_org=key.lockVersion.orgId,
+        command=command,
+        encrypt=0xAA,
+        data=aes_encrypt(plaintext, hex_key_to_bytes(key.aesKeyStr)),
+    )
+
+
 def _keypad_record(pwd: str = "1234") -> bytes:  # noqa: S107  -- test fixture, not a real secret
     return (
         bytes([LogOperate.KEYBOARD_PASSWORD_UNLOCK])  # type
@@ -279,6 +296,127 @@ class TestOperationLogPagination:
         client._transport.exchange = fake_exchange  # type: ignore[method-assign]
         entries = asyncio.run(client.get_operation_log(max_entries=2))
         assert [e.password for e in entries] == ["aaaa", "bbbb"]
+
+    def test_debug_logs_do_not_contain_passcodes(self, caplog):
+        key = make_virtual_key()
+        client = TTLockClient(key)
+        secret_code = "583921"
+        replies = iter(
+            [
+                _operate_log_response_frame(
+                    key,
+                    sequence=1,
+                    records=[_keypad_record(secret_code)],
+                ),
+                _operate_log_response_frame(key, sequence=0, records=[]),
+            ]
+        )
+
+        async def fake_exchange(_frame: Frame, *, timeout: float = 6.0) -> Frame:  # noqa: ASYNC109
+            return next(replies)
+
+        client._transport.exchange = fake_exchange  # type: ignore[method-assign]
+        with caplog.at_level("DEBUG", logger="ttlock_ble.client"):
+            entries = asyncio.run(client.get_operation_log())
+        assert entries[0].password == secret_code
+        assert secret_code not in caplog.text
+
+
+class TestManagementCommands:
+    def test_get_capabilities_parses_feature_mask(self):
+        key = make_virtual_key()
+        client = TTLockClient(key)
+        mask = (1 << 4) | (1 << 22)
+        reply = _encrypted_response_frame(
+            key,
+            0x01,
+            bytes([0x01, 0x01, 90]) + mask.to_bytes(3, "big"),
+        )
+
+        async def fake_exchange(_frame: Frame, *, timeout: float = 6.0) -> Frame:  # noqa: ASYNC109
+            return reply
+
+        client._transport.exchange = fake_exchange  # type: ignore[method-assign]
+        capabilities = asyncio.run(client.get_capabilities())
+        assert capabilities.supports_auto_lock
+        assert capabilities.supports_passage_mode
+        assert not capabilities.supports_passcodes
+
+    def test_get_passage_modes_pages_by_response_sequence(self):
+        key = make_virtual_key()
+        client = TTLockClient(key)
+        monday = bytes([PassageModeType.WEEKLY, 1, 0, 8, 30, 17, 30])
+        tuesday = bytes([PassageModeType.WEEKLY, 2, 0, 8, 30, 17, 30])
+        replies = iter(
+            [
+                _encrypted_response_frame(
+                    key,
+                    0x66,
+                    bytes([0x66, 0x01, 90, PassageModeOperation.QUERY, 4]) + monday,
+                ),
+                _encrypted_response_frame(
+                    key,
+                    0x66,
+                    bytes([0x66, 0x01, 90, PassageModeOperation.QUERY, 0]) + tuesday,
+                ),
+            ]
+        )
+        sent: list[Frame] = []
+
+        async def fake_exchange(frame: Frame, *, timeout: float = 6.0) -> Frame:  # noqa: ASYNC109
+            sent.append(frame)
+            return next(replies)
+
+        client._transport.exchange = fake_exchange  # type: ignore[method-assign]
+        schedules = asyncio.run(client.get_passage_modes())
+        aes_key = hex_key_to_bytes(key.aesKeyStr)
+        assert [aes_decrypt(frame.data, aes_key) for frame in sent] == [b"\x01\x00", b"\x01\x04"]
+        assert [schedule.week_or_day for schedule in schedules] == [1, 2]
+
+    @pytest.mark.parametrize(
+        ("method_name", "operation"),
+        [("add_passage_mode", 2), ("delete_passage_mode", 3)],
+    )
+    def test_passage_mode_change_uses_native_operation(self, method_name, operation):
+        key = make_virtual_key()
+        client = TTLockClient(key)
+        schedule = PassageMode(
+            mode_type=PassageModeType.WEEKLY,
+            week_or_day=1,
+            month=0,
+            start_time=dt.time(8, 30),
+            end_time=dt.time(17, 30),
+        )
+        sent: list[Frame] = []
+
+        async def fake_exchange(frame: Frame, *, timeout: float = 6.0) -> Frame:  # noqa: ASYNC109
+            sent.append(frame)
+            return _encrypted_response_frame(key, 0x66, bytes([0x66, 0x01]))
+
+        client._transport.exchange = fake_exchange  # type: ignore[method-assign]
+        asyncio.run(getattr(client, method_name)(schedule))
+        plain = aes_decrypt(sent[0].data, hex_key_to_bytes(key.aesKeyStr))
+        assert plain == bytes([operation, 1, 1, 0, 8, 30, 17, 30])
+
+    def test_clear_passage_modes_uses_clear_operation(self):
+        key = make_virtual_key()
+        client = TTLockClient(key)
+        sent: list[Frame] = []
+
+        async def fake_exchange(frame: Frame, *, timeout: float = 6.0) -> Frame:  # noqa: ASYNC109
+            sent.append(frame)
+            return _encrypted_response_frame(key, 0x66, bytes([0x66, 0x01]))
+
+        client._transport.exchange = fake_exchange  # type: ignore[method-assign]
+        asyncio.run(client.clear_passage_modes())
+        plain = aes_decrypt(sent[0].data, hex_key_to_bytes(key.aesKeyStr))
+        assert plain == bytes([PassageModeOperation.CLEAR])
+
+    def test_passcode_validation_does_not_echo_secret(self):
+        secret_code = "123"
+        with pytest.raises(ValueError) as error:
+            asyncio.run(TTLockClient(make_virtual_key()).add_passcode(secret_code))
+        assert secret_code not in str(error.value)
 
 
 def _get_lock_time_response_frame(key: VirtualKey, when: dt.datetime) -> Frame:

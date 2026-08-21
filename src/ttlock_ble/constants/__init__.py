@@ -10,6 +10,8 @@ from .auto_lock_operate import AutoLockOperate
 from .keyboard_pwd_type import KeyboardPwdType
 from .lock_state import LockState
 from .log_operate import LogOperate
+from .passage_mode_operation import PassageModeOperation
+from .passage_mode_type import PassageModeType
 from .pwd_operate_type import PwdOperateType
 from .response_status import ResponseStatus
 
@@ -18,6 +20,8 @@ __all__ = [
     "KeyboardPwdType",
     "LockState",
     "LogOperate",
+    "PassageModeOperation",
+    "PassageModeType",
     "PwdOperateType",
     "ResponseStatus",
 ]

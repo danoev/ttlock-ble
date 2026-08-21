@@ -22,6 +22,7 @@ from .control import (
     payload_unlock,
 )
 from .envelope import RESPONSE_FAILED, RESPONSE_SUCCESS, parse_response_status
+from .features import parse_feature_response, payload_feature_query
 from .opcodes import (
     APICMD_LOCK_BY_ADMIN,
     APICMD_LOCK_BY_USER,
@@ -31,6 +32,7 @@ from .opcodes import (
     CMD_CHECK_ADMIN,
     CMD_CHECK_RANDOM,
     CMD_CHECK_USER_TIME,
+    CMD_CONFIGURE_PASSAGE_MODE,
     CMD_GET_AES_KEY,
     CMD_GET_LOCK_TIME,
     CMD_GET_OPERATE_LOG,
@@ -45,6 +47,12 @@ from .opcodes import (
     CMD_UNLOCK,
 )
 from .operate_log import parse_operate_log_response, payload_operate_log_request
+from .passage_mode import (
+    parse_passage_mode_response,
+    payload_passage_mode_change,
+    payload_passage_mode_clear,
+    payload_passage_mode_query,
+)
 from .passcode import payload_passcode_add, payload_passcode_clear, payload_passcode_delete
 from .session import (
     VENDOR,
@@ -64,6 +72,7 @@ __all__ = [
     "CMD_CHECK_ADMIN",
     "CMD_CHECK_RANDOM",
     "CMD_CHECK_USER_TIME",
+    "CMD_CONFIGURE_PASSAGE_MODE",
     "CMD_GET_AES_KEY",
     "CMD_GET_LOCK_TIME",
     "CMD_GET_OPERATE_LOG",
@@ -83,9 +92,11 @@ __all__ = [
     "VENDOR",
     "parse_auto_lock_response",
     "parse_check_user_time_response",
+    "parse_feature_response",
     "parse_get_lock_time_response",
     "parse_lock_status",
     "parse_operate_log_response",
+    "parse_passage_mode_response",
     "parse_response_status",
     "parse_state_battery",
     "payload_auto_lock_search",
@@ -93,9 +104,13 @@ __all__ = [
     "payload_check_admin",
     "payload_check_random",
     "payload_check_user_time",
+    "payload_feature_query",
     "payload_get_aes_key",
     "payload_get_lock_time",
     "payload_operate_log_request",
+    "payload_passage_mode_change",
+    "payload_passage_mode_clear",
+    "payload_passage_mode_query",
     "payload_passcode_add",
     "payload_passcode_clear",
     "payload_passcode_delete",

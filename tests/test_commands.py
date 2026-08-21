@@ -9,7 +9,13 @@ import pytest
 
 from ttlock_ble import commands as cmd
 from ttlock_ble.commands import log_record
-from ttlock_ble.constants import KeyboardPwdType, LockState
+from ttlock_ble.constants import (
+    KeyboardPwdType,
+    LockState,
+    PassageModeOperation,
+    PassageModeType,
+)
+from ttlock_ble.models import PassageMode
 
 if TYPE_CHECKING:
     from ttlock_ble.models import LogEntry
@@ -76,6 +82,36 @@ class TestPayloadBuilders:
         assert cmd.payload_operate_log_request() == b"\xff\xff"
         assert cmd.payload_operate_log_request(5) == b"\x00\x05"
 
+    def test_feature_query_is_empty(self) -> None:
+        assert cmd.payload_feature_query() == b""
+
+    def test_passage_mode_query_and_clear(self) -> None:
+        assert cmd.payload_passage_mode_query(7) == bytes([1, 7])
+        assert cmd.payload_passage_mode_clear() == bytes([4])
+
+    def test_passage_mode_add_layout(self) -> None:
+        schedule = PassageMode(
+            mode_type=PassageModeType.WEEKLY,
+            week_or_day=1,
+            month=0,
+            start_time=dt.time(8, 30),
+            end_time=dt.time(17, 30),
+        )
+        assert cmd.payload_passage_mode_change(PassageModeOperation.ADD, schedule) == bytes(
+            [2, 1, 1, 0, 8, 30, 17, 30]
+        )
+
+    def test_passage_mode_change_rejects_query(self) -> None:
+        schedule = PassageMode(
+            mode_type=PassageModeType.WEEKLY,
+            week_or_day=0,
+            month=0,
+            start_time=dt.time(),
+            end_time=dt.time(),
+        )
+        with pytest.raises(ValueError, match="ADD or DELETE"):
+            cmd.payload_passage_mode_change(PassageModeOperation.QUERY, schedule)
+
 
 class TestParsers:
     def test_response_status_too_short(self) -> None:
@@ -113,6 +149,61 @@ class TestParsers:
     def test_auto_lock_modify_ack_has_no_seconds(self) -> None:
         plain = bytes([0x36, cmd.RESPONSE_SUCCESS, 90, 2])
         assert cmd.parse_auto_lock_response(plain) == (-1, 90)
+
+    def test_feature_response_supports_bits_above_uint32(self) -> None:
+        mask = (1 << 0) | (1 << 22) | (1 << 34)
+        plain = bytes([0x01, cmd.RESPONSE_SUCCESS, 91]) + mask.to_bytes(5, "big")
+        capabilities, battery = cmd.parse_feature_response(plain)
+        assert battery == 91
+        assert capabilities.supports_passcodes
+        assert capabilities.supports_passage_mode
+        assert capabilities.supports_cyclic_cards_or_fingerprints
+        assert not capabilities.supports_sound
+
+    def test_feature_response_rejects_short_data(self) -> None:
+        with pytest.raises(ValueError, match="feature bit field"):
+            cmd.parse_feature_response(bytes([0x01, cmd.RESPONSE_SUCCESS, 90]))
+
+    def test_passage_mode_response_parses_schedules(self) -> None:
+        record = bytes([PassageModeType.WEEKLY, 2, 0, 9, 15, 13, 45])
+        plain = (
+            bytes(
+                [
+                    0x66,
+                    cmd.RESPONSE_SUCCESS,
+                    88,
+                    PassageModeOperation.QUERY,
+                    5,
+                ]
+            )
+            + record
+        )
+        schedules, sequence = cmd.parse_passage_mode_response(plain)
+        assert sequence == 5
+        assert schedules == [
+            PassageMode(
+                mode_type=PassageModeType.WEEKLY,
+                week_or_day=2,
+                month=0,
+                start_time=dt.time(9, 15),
+                end_time=dt.time(13, 45),
+            )
+        ]
+
+    def test_passage_mode_response_rejects_truncated_record(self) -> None:
+        plain = bytes([0x66, cmd.RESPONSE_SUCCESS, 88, 1, 0, 1])
+        with pytest.raises(ValueError, match="truncated schedule"):
+            cmd.parse_passage_mode_response(plain)
+
+    def test_passage_mode_model_rejects_second_precision(self) -> None:
+        with pytest.raises(ValueError, match="minute precision"):
+            PassageMode(
+                mode_type=PassageModeType.WEEKLY,
+                week_or_day=1,
+                month=0,
+                start_time=dt.time(8, 0, 1),
+                end_time=dt.time(9),
+            )
 
     def test_operate_log_failure_empty(self) -> None:
         assert cmd.parse_operate_log_response(bytes([0x25, cmd.RESPONSE_FAILED])) == ([], 0)
