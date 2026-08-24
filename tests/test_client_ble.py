@@ -124,6 +124,22 @@ def patched_connect(monkeypatch):
 
 
 class TestConnect:
+    async def test_connect_passes_configured_attempt_budget(self, monkeypatch) -> None:
+        key = make_virtual_key()
+        client = TTLockClient(key, device=MagicMock(), connect_attempts=1)
+        fake = FakeBleakClient(key)
+        observed_attempts: list[int] = []
+
+        async def _establish(*_args, max_attempts: int, **_kwargs) -> FakeBleakClient:
+            observed_attempts.append(max_attempts)
+            return fake
+
+        monkeypatch.setattr(client_mod, "establish_connection", _establish)
+
+        await client.connect()
+
+        assert observed_attempts == [1]
+
     async def test_connect_discovers_chars_and_starts_notify(self, patched_connect) -> None:
         key = make_virtual_key()
         client = TTLockClient(key, device=MagicMock())
