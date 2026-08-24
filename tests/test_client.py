@@ -30,6 +30,19 @@ class TestConstruction:
         client = TTLockClient.from_ble_device(device, make_virtual_key())
         assert client._device is device
 
+    def test_from_ble_device_accepts_connection_attempt_budget(self):
+        device = MagicMock()
+        client = TTLockClient.from_ble_device(
+            device,
+            make_virtual_key(),
+            connect_attempts=1,
+        )
+        assert client._connect_attempts == 1
+
+    def test_connection_attempt_budget_must_be_positive(self):
+        with pytest.raises(ValueError, match="at least 1"):
+            TTLockClient(make_virtual_key(), connect_attempts=0)
+
     def test_disconnected_callback_stored(self):
         cb = MagicMock(name="disconnected_callback")
         client = TTLockClient.from_ble_device(

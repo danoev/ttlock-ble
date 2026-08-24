@@ -68,7 +68,7 @@ class TTLockClient:
     LOCK / state command.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 -- independent BLE link tuning parameters
         self,
         key: VirtualKey,
         *,
@@ -76,6 +76,7 @@ class TTLockClient:
         scan_timeout: float = 25.0,
         disconnected_callback: DisconnectedCallback | None = None,
         keep_alive_after_command: float = _DEFAULT_KEEP_ALIVE_SECONDS,
+        connect_attempts: int = _CONNECT_RETRIES,
     ) -> None:
         """Configure the client; no BLE I/O happens until `connect()`.
 
@@ -104,6 +105,9 @@ class TTLockClient:
         self._command_lock = asyncio.Lock()
         self._keep_alive_seconds = keep_alive_after_command
         self._keep_alive_task: asyncio.Task[None] | None = None
+        if connect_attempts < 1:
+            raise ValueError("connect_attempts must be at least 1")
+        self._connect_attempts = connect_attempts
 
     @classmethod
     def from_ble_device(
@@ -113,6 +117,7 @@ class TTLockClient:
         *,
         disconnected_callback: DisconnectedCallback | None = None,
         keep_alive_after_command: float = _DEFAULT_KEEP_ALIVE_SECONDS,
+        connect_attempts: int = _CONNECT_RETRIES,
     ) -> TTLockClient:
         """Build a client around a `BLEDevice` already resolved by the caller.
 
@@ -127,6 +132,7 @@ class TTLockClient:
             device=device,
             disconnected_callback=disconnected_callback,
             keep_alive_after_command=keep_alive_after_command,
+            connect_attempts=connect_attempts,
         )
 
     @property
@@ -167,7 +173,7 @@ class TTLockClient:
                 self.key.lockAlias or self.key.lockName or self.key.lockMac,
                 disconnected_callback=self._disconnected_callback,
                 use_services_cache=True,
-                max_attempts=_CONNECT_RETRIES,
+                max_attempts=self._connect_attempts,
             )
         except Exception as exc:
             raise TTLockError(f"Failed to connect to lock over BLE: {exc}") from exc
