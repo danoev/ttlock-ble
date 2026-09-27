@@ -55,6 +55,21 @@ _DEFAULT_KEEP_ALIVE_SECONDS = 25.0
 _KEEP_ALIVE_INTERVAL = 2.0
 
 
+class _OwnedBleakClient(BleakClientWithServiceCache):
+    """Register a connector-created client before its first connection await."""
+
+    def __init__(
+        self,
+        address_or_ble_device: BLEDevice | str,
+        *,
+        ttlock_client_created: Callable[[BleakClient], None],
+        **kwargs: object,
+    ) -> None:
+        # Connector/backend keywords are intentionally opaque to this shim.
+        super().__init__(address_or_ble_device, **kwargs)  # type: ignore[arg-type]
+        ttlock_client_created(self)
+
+
 class TTLockClient:
     """Async BLE client driving a single, already-paired TTLock-family lock.
 
@@ -96,6 +111,9 @@ class TTLockClient:
         self._device: BLEDevice | None = device
         self._disconnected_callback = disconnected_callback
         self._client: BleakClient | None = None
+        self._connection_cleanup_confirmed = True
+        self._connection_acquiring = False
+        self._connection_ready = False
         self._write_char: BleakGATTCharacteristic | None = None
         self._notify_char: BleakGATTCharacteristic | None = None
         self._reassembler = FrameReassembler()
@@ -140,6 +158,20 @@ class TTLockClient:
         """True iff a BLE connection is currently open."""
         return self._client is not None and self._client.is_connected
 
+    @property
+    def connection_cleanup_confirmed(self) -> bool:
+        """Report explicit SDK resource-release evidence, not physical radio proof.
+
+        True means no setup was attempted, or the owned backend's disconnect
+        completed successfully and its public connected flag was false. An
+        unassigned client after an attempted setup is deliberately uncertain.
+        """
+        return self._connection_cleanup_confirmed and not self._connection_acquiring
+
+    def _own_bleak_client(self, client: BleakClient) -> None:
+        """Keep the backend handle even if establishment never returns it."""
+        self._client = client
+
     async def __aenter__(self) -> Self:
         """Connect on entry; disconnect on exit."""
         await self.connect()
@@ -157,8 +189,10 @@ class TTLockClient:
         survives transient failures (essential under Home Assistant and
         ESPHome BLE proxies).
         """
-        if self.is_connected:
+        if self._connection_ready and self.is_connected:
             return
+        if self._connection_acquiring or not self.connection_cleanup_confirmed:
+            raise TTLockError("Previous BLE setup requires confirmed cleanup before reconnecting")
         if self._device is None:
             self._device = await self._find_device()
         if self._device is None:
@@ -166,39 +200,61 @@ class TTLockClient:
                 f"Failed to find lock {self.key.lockMac} via BLE scan: "
                 "wake the lock by touching the keypad and try again"
             )
+        self._connection_cleanup_confirmed = False
+        self._connection_acquiring = True
+        self._connection_ready = False
         try:
-            self._client = await establish_connection(
-                BleakClientWithServiceCache,
-                self._device,
-                self.key.lockAlias or self.key.lockName or self.key.lockMac,
-                disconnected_callback=self._disconnected_callback,
-                use_services_cache=True,
-                max_attempts=self._connect_attempts,
+            try:
+                self._client = await establish_connection(
+                    _OwnedBleakClient,
+                    self._device,
+                    self.key.lockAlias or self.key.lockName or self.key.lockMac,
+                    disconnected_callback=self._disconnected_callback,
+                    use_services_cache=True,
+                    max_attempts=self._connect_attempts,
+                    ttlock_client_created=self._own_bleak_client,
+                )
+            except Exception as exc:
+                raise TTLockError(f"Failed to connect to lock over BLE: {exc}") from exc
+            await self._discover_chars()
+            assert self._notify_char is not None
+            await self._client.start_notify(self._notify_char, self._on_notify)
+            await asyncio.sleep(_POST_NOTIFY_SETTLE)
+            await self._wake_battery_read()
+            self._connection_ready = True
+            log.info(
+                "Connected to %s (%s)",
+                self.key.lockAlias or self.key.lockName,
+                self.key.lockMac,
             )
-        except Exception as exc:
-            raise TTLockError(f"Failed to connect to lock over BLE: {exc}") from exc
-        await self._discover_chars()
-        assert self._notify_char is not None
-        await self._client.start_notify(self._notify_char, self._on_notify)
-        await asyncio.sleep(_POST_NOTIFY_SETTLE)
-        await self._wake_battery_read()
-        log.info(
-            "Connected to %s (%s)",
-            self.key.lockAlias or self.key.lockName,
-            self.key.lockMac,
-        )
+        finally:
+            self._connection_acquiring = False
 
     async def disconnect(self) -> None:
-        """Stop notifications and tear down the BLE connection."""
+        """Release an owned backend or raise while cleanup remains uncertain."""
+        if self._connection_acquiring:
+            raise TTLockError(
+                "BLE setup is still running; cancel and await it before disconnecting"
+            )
         await self._stop_keep_alive()
-        if self._client is not None and self._client.is_connected:
+        if self._client is None:
+            if not self.connection_cleanup_confirmed:
+                raise TTLockError("BLE setup ownership is unavailable; cleanup cannot be confirmed")
+            return
+        if self._client.is_connected:
             try:
                 if self._notify_char is not None:
                     await self._client.stop_notify(self._notify_char)
             except Exception:  # teardown swallows whatever bleak raises
                 log.debug("stop_notify failed; ignoring on teardown", exc_info=True)
-            await self._client.disconnect()
+        # A false connected flag during pending/failed establishment is not
+        # evidence that the backend released the peripheral connection request.
+        await self._client.disconnect()
+        if self._client.is_connected:
+            raise TTLockError("BLE backend still reports connected after disconnect")
         self._client = None
+        self._connection_cleanup_confirmed = True
+        self._connection_ready = False
 
     async def unlock(self) -> None:
         """Unlock the door (status=SUCCESS or raises).
