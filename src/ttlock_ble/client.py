@@ -55,6 +55,21 @@ _DEFAULT_KEEP_ALIVE_SECONDS = 25.0
 _KEEP_ALIVE_INTERVAL = 2.0
 
 
+class _OwnedBleakClient(BleakClientWithServiceCache):
+    """Register a connector-created client before its first connection await."""
+
+    def __init__(
+        self,
+        address_or_ble_device: BLEDevice | str,
+        *,
+        ttlock_client_created: Callable[[BleakClient], None],
+        **kwargs: object,
+    ) -> None:
+        # Connector/backend keywords are intentionally opaque to this shim.
+        super().__init__(address_or_ble_device, **kwargs)  # type: ignore[arg-type]
+        ttlock_client_created(self)
+
+
 class TTLockClient:
     """Async BLE client driving a single, already-paired TTLock-family lock.
 
@@ -68,7 +83,7 @@ class TTLockClient:
     LOCK / state command.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 -- independent BLE link tuning parameters
         self,
         key: VirtualKey,
         *,
@@ -76,6 +91,7 @@ class TTLockClient:
         scan_timeout: float = 25.0,
         disconnected_callback: DisconnectedCallback | None = None,
         keep_alive_after_command: float = _DEFAULT_KEEP_ALIVE_SECONDS,
+        connect_attempts: int = _CONNECT_RETRIES,
     ) -> None:
         """Configure the client; no BLE I/O happens until `connect()`.
 
@@ -95,6 +111,9 @@ class TTLockClient:
         self._device: BLEDevice | None = device
         self._disconnected_callback = disconnected_callback
         self._client: BleakClient | None = None
+        self._connection_cleanup_confirmed = True
+        self._connection_acquiring = False
+        self._connection_ready = False
         self._write_char: BleakGATTCharacteristic | None = None
         self._notify_char: BleakGATTCharacteristic | None = None
         self._reassembler = FrameReassembler()
@@ -104,6 +123,9 @@ class TTLockClient:
         self._command_lock = asyncio.Lock()
         self._keep_alive_seconds = keep_alive_after_command
         self._keep_alive_task: asyncio.Task[None] | None = None
+        if connect_attempts < 1:
+            raise ValueError("connect_attempts must be at least 1")
+        self._connect_attempts = connect_attempts
 
     @classmethod
     def from_ble_device(
@@ -113,6 +135,7 @@ class TTLockClient:
         *,
         disconnected_callback: DisconnectedCallback | None = None,
         keep_alive_after_command: float = _DEFAULT_KEEP_ALIVE_SECONDS,
+        connect_attempts: int = _CONNECT_RETRIES,
     ) -> TTLockClient:
         """Build a client around a `BLEDevice` already resolved by the caller.
 
@@ -127,12 +150,31 @@ class TTLockClient:
             device=device,
             disconnected_callback=disconnected_callback,
             keep_alive_after_command=keep_alive_after_command,
+            connect_attempts=connect_attempts,
         )
 
     @property
     def is_connected(self) -> bool:
         """True iff a BLE connection is currently open."""
         return self._client is not None and self._client.is_connected
+
+    @property
+    def connection_cleanup_confirmed(self) -> bool:
+        """Report explicit SDK resource-release evidence, not physical radio proof.
+
+        True means no setup was attempted, or the owned backend's disconnect
+        completed successfully and its public connected flag was false. An
+        unassigned client after an attempted setup is deliberately uncertain.
+        """
+        return (
+            self._connection_cleanup_confirmed
+            and not self._connection_acquiring
+            and self._client is None
+        )
+
+    def _own_bleak_client(self, client: BleakClient) -> None:
+        """Keep the backend handle even if establishment never returns it."""
+        self._client = client
 
     async def __aenter__(self) -> Self:
         """Connect on entry; disconnect on exit."""
@@ -151,8 +193,10 @@ class TTLockClient:
         survives transient failures (essential under Home Assistant and
         ESPHome BLE proxies).
         """
-        if self.is_connected:
+        if self._connection_ready and self.is_connected:
             return
+        if self._connection_acquiring or not self.connection_cleanup_confirmed:
+            raise TTLockError("Previous BLE setup requires confirmed cleanup before reconnecting")
         if self._device is None:
             self._device = await self._find_device()
         if self._device is None:
@@ -160,39 +204,61 @@ class TTLockClient:
                 f"Failed to find lock {self.key.lockMac} via BLE scan: "
                 "wake the lock by touching the keypad and try again"
             )
+        self._connection_cleanup_confirmed = False
+        self._connection_acquiring = True
+        self._connection_ready = False
         try:
-            self._client = await establish_connection(
-                BleakClientWithServiceCache,
-                self._device,
-                self.key.lockAlias or self.key.lockName or self.key.lockMac,
-                disconnected_callback=self._disconnected_callback,
-                use_services_cache=True,
-                max_attempts=_CONNECT_RETRIES,
+            try:
+                self._client = await establish_connection(
+                    _OwnedBleakClient,
+                    self._device,
+                    self.key.lockAlias or self.key.lockName or self.key.lockMac,
+                    disconnected_callback=self._disconnected_callback,
+                    use_services_cache=True,
+                    max_attempts=self._connect_attempts,
+                    ttlock_client_created=self._own_bleak_client,
+                )
+            except Exception as exc:
+                raise TTLockError(f"Failed to connect to lock over BLE: {exc}") from exc
+            await self._discover_chars()
+            assert self._notify_char is not None
+            await self._client.start_notify(self._notify_char, self._on_notify)
+            await asyncio.sleep(_POST_NOTIFY_SETTLE)
+            await self._wake_battery_read()
+            self._connection_ready = True
+            log.info(
+                "Connected to %s (%s)",
+                self.key.lockAlias or self.key.lockName,
+                self.key.lockMac,
             )
-        except Exception as exc:
-            raise TTLockError(f"Failed to connect to lock over BLE: {exc}") from exc
-        await self._discover_chars()
-        assert self._notify_char is not None
-        await self._client.start_notify(self._notify_char, self._on_notify)
-        await asyncio.sleep(_POST_NOTIFY_SETTLE)
-        await self._wake_battery_read()
-        log.info(
-            "Connected to %s (%s)",
-            self.key.lockAlias or self.key.lockName,
-            self.key.lockMac,
-        )
+        finally:
+            self._connection_acquiring = False
 
     async def disconnect(self) -> None:
-        """Stop notifications and tear down the BLE connection."""
+        """Release an owned backend or raise while cleanup remains uncertain."""
+        if self._connection_acquiring:
+            raise TTLockError(
+                "BLE setup is still running; cancel and await it before disconnecting"
+            )
         await self._stop_keep_alive()
-        if self._client is not None and self._client.is_connected:
+        if self._client is None:
+            if not self.connection_cleanup_confirmed:
+                raise TTLockError("BLE setup ownership is unavailable; cleanup cannot be confirmed")
+            return
+        if self._client.is_connected:
             try:
                 if self._notify_char is not None:
                     await self._client.stop_notify(self._notify_char)
             except Exception:  # teardown swallows whatever bleak raises
                 log.debug("stop_notify failed; ignoring on teardown", exc_info=True)
-            await self._client.disconnect()
+        # A false connected flag during pending/failed establishment is not
+        # evidence that the backend released the peripheral connection request.
+        await self._client.disconnect()
+        if self._client.is_connected:
+            raise TTLockError("BLE backend still reports connected after disconnect")
         self._client = None
+        self._connection_cleanup_confirmed = True
+        self._connection_ready = False
 
     async def unlock(self) -> None:
         """Unlock the door (status=SUCCESS or raises).
@@ -230,15 +296,15 @@ class TTLockClient:
             plain = self._decrypt_response(resp, "calibrate_time")
             echo, status, data = self._parse_response_envelope(plain, "calibrate_time")
             log.info(
-                "calibrate_time response: cmd_echo=0x%02x status=%d data=%s",
+                "calibrate_time response: cmd_echo=0x%02x status=%d data_bytes=%d",
                 echo,
                 status,
-                data.hex(),
+                len(data),
             )
             if status != cmd.RESPONSE_SUCCESS:
                 raise TTLockError(
                     f"Failed to calibrate lock time: lock rejected with "
-                    f"status={status:#x}, error={data.hex()}"
+                    f"status={status:#x}, error_bytes={len(data)}"
                 )
 
     async def get_lock_time(self) -> dt.datetime:
@@ -322,7 +388,7 @@ class TTLockClient:
             ).encrypt_data(self._aes_key)
             resp = await self._exchange(frame)
             plain = self._decrypt_response(resp, "query_state")
-            log.debug("state response plaintext: %s", plain.hex())
+            log.debug("state response: payload_bytes=%d", len(plain))
             try:
                 return cmd.parse_lock_status(plain), cmd.parse_state_battery(plain)
             except ValueError as error:
@@ -420,7 +486,7 @@ class TTLockClient:
                 ).encrypt_data(self._aes_key)
                 resp = await self._exchange(frame)
                 plain = self._decrypt_response(resp, "operate_log")
-                log.debug("operate_log response plaintext: %s", plain.hex())
+                log.debug("operate_log response: payload_bytes=%d", len(plain))
                 try:
                     page, last_seq = cmd.parse_operate_log_response(plain)
                 except ValueError as error:
@@ -567,7 +633,7 @@ class TTLockClient:
             log.debug("Battery read skipped", exc_info=True)
 
     def _on_notify(self, _char: BleakGATTCharacteristic, data: bytearray) -> None:
-        log.debug("RX %s", bytes(data).hex())
+        log.debug("RX notification: %d bytes", len(data))
         for frame in self._reassembler.feed(bytes(data)):
             if self._waiting_for_response > 0:
                 self._inbox.put_nowait(frame)
@@ -582,7 +648,12 @@ class TTLockClient:
             plain = aes_decrypt(frame.data, self._aes_key)
             echo, status, data = cmd.parse_response_status(plain)
         except (ValueError, RuntimeError) as exc:
-            log.warning("Could not decode push event (%s): %s", exc, frame.data.hex())
+            log.warning(
+                "Could not decode push event (error_type=%s, cmd=0x%02x, data_bytes=%d)",
+                type(exc).__name__,
+                frame.command,
+                len(frame.data),
+            )
             return
         event = LockEvent.from_payload(echo, status, data)
         for listener in list(self._event_listeners):
@@ -595,7 +666,7 @@ class TTLockClient:
         assert self._client is not None
         assert self._write_char is not None
         wire = frame.build()
-        log.debug("TX %s (%d bytes)", wire.hex(), len(wire))
+        log.debug("TX cmd=0x%02x (%d bytes)", frame.command, len(wire))
         for i in range(0, len(wire), _BLE_WRITE_CHUNK):
             await self._client.write_gatt_char(
                 self._write_char,
@@ -701,17 +772,17 @@ class TTLockClient:
         )
         resp = await self._exchange(frame)
         log.debug(
-            "check_user_time response: cmd=0x%02x encrypt=0x%02x data=%s",
+            "check_user_time response: cmd=0x%02x encrypt=0x%02x data_bytes=%d",
             resp.command,
             resp.encrypt,
-            resp.data.hex(),
+            len(resp.data),
         )
         plain = self._decrypt_response(resp, "check_user_time")
         try:
             ps = cmd.parse_check_user_time_response(plain)
         except (RuntimeError, ValueError) as error:
             raise TTLockError(f"Failed to validate virtual key with lock: {error}") from error
-        log.info("psFromLock = 0x%08x", ps)
+        log.info("CHECK_USER_TIME authentication succeeded")
         return ps
 
     async def _auto_lock_exchange(self, payload: bytes) -> tuple[int, int | None]:
@@ -720,7 +791,7 @@ class TTLockClient:
         ).encrypt_data(self._aes_key)
         resp = await self._exchange(frame)
         plain = self._decrypt_response(resp, "auto_lock")
-        log.debug("auto_lock response plaintext: %s", plain.hex())
+        log.debug("auto_lock response: payload_bytes=%d", len(plain))
         try:
             return cmd.parse_auto_lock_response(plain)
         except ValueError as error:
@@ -734,15 +805,15 @@ class TTLockClient:
         plain = self._decrypt_response(resp, label)
         echo, status, data = self._parse_response_envelope(plain, label)
         log.info(
-            "%s response: cmd_echo=0x%02x status=%d data=%s",
+            "%s response: cmd_echo=0x%02x status=%d data_bytes=%d",
             label,
             echo,
             status,
-            data.hex(),
+            len(data),
         )
         if status != cmd.RESPONSE_SUCCESS:
             raise TTLockError(
-                f"Failed to {label}: lock rejected with status={status:#x}, error={data.hex()}"
+                f"Failed to {label}: lock rejected with status={status:#x}, error_bytes={len(data)}"
             )
 
     async def _control_lock(self, opcode: int, ps: int, label: str) -> None:
@@ -755,13 +826,13 @@ class TTLockClient:
         plain = self._decrypt_response(resp, label)
         echo, status, data = self._parse_response_envelope(plain, label)
         log.info(
-            "%s response: cmd_echo=0x%02x status=%d data=%s",
+            "%s response: cmd_echo=0x%02x status=%d data_bytes=%d",
             label,
             echo,
             status,
-            data.hex(),
+            len(data),
         )
         if status != cmd.RESPONSE_SUCCESS:
             raise TTLockError(
-                f"Failed to {label}: lock rejected with status={status:#x}, error={data.hex()}"
+                f"Failed to {label}: lock rejected with status={status:#x}, error_bytes={len(data)}"
             )

@@ -130,11 +130,11 @@ class Frame:
         further down as an unrelated AES block-size error.
         """
         if len(raw) < 7 or raw[0] != HEADER[0] or raw[1] != HEADER[1]:
-            raise ValueError(f"Invalid TTLock frame: {raw.hex()}")
+            raise ValueError(f"Invalid TTLock frame: received {len(raw)} bytes")
         proto = raw[2]
         header_len = V3_HEADER_LEN if proto >= 5 else LEGACY_HEADER_LEN
         if len(raw) < header_len:
-            raise ValueError(f"Truncated TTLock frame header: {raw.hex()}")
+            raise ValueError(f"Truncated TTLock frame header: received {len(raw)} bytes")
         length = raw[V3_LENGTH_INDEX if proto >= 5 else LEGACY_LENGTH_INDEX]
         if len(raw) < header_len + length:
             raise ValueError(

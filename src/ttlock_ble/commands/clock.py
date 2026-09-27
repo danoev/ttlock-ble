@@ -36,8 +36,8 @@ def parse_get_lock_time_response(plaintext: bytes) -> dt.datetime:
     """
     _cmd_echo, status, data = parse_response_status(plaintext)
     if status != RESPONSE_SUCCESS:
-        raise RuntimeError(f"getLockTime FAILED: status={status:#x} err={data.hex()}")
+        raise RuntimeError(f"getLockTime FAILED: status={status:#x} error_bytes={len(data)}")
     parsed = decode_date6(data[:6])
     if parsed is None:
-        raise ValueError(f"getLockTime payload not a valid date: {plaintext.hex()}")
+        raise ValueError(f"getLockTime payload not a valid date: {len(plaintext)} bytes")
     return parsed

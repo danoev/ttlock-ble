@@ -223,7 +223,7 @@ class TTLockCloud:
                 try:
                     keys.append(VirtualKey.from_cloud(item, uid=self.creds.uid))
                 except (KeyError, ValueError, TypeError) as exc:
-                    log.warning("Skipping malformed key row: %s", exc)
+                    log.warning("Skipping malformed key row (error_type=%s)", type(exc).__name__)
             pages_field = body.get("pages") or body.get("pageNos") or 1
             pages = int(str(pages_field))
             if page_no >= pages or not page:
