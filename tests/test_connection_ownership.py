@@ -50,6 +50,8 @@ async def test_unassigned_attempt_is_not_confirmed_cleanup(monkeypatch):
     assert client._client is None
     assert client.is_connected is False
     assert client.connection_cleanup_confirmed is False
+    with pytest.raises(TTLockError, match="requires confirmed cleanup"):
+        await client.connect()
     with pytest.raises(TTLockError, match="cannot be confirmed"):
         await client.disconnect()
     assert client.connection_cleanup_confirmed is False
@@ -207,5 +209,49 @@ async def test_disconnect_cannot_retire_backend_while_setup_is_running(monkeypat
     attempt.cancel()
     with pytest.raises(asyncio.CancelledError):
         await attempt
+    await client.disconnect()
+    assert client.connection_cleanup_confirmed is True
+
+
+async def test_real_connector_transients_keep_one_registered_owner(monkeypatch):
+    import bleak_retry_connector as connector
+    from bleak.exc import BleakError
+
+    created = []
+
+    class Backend:
+        is_connected = False
+        attempts = 0
+        start_notify = AsyncMock(return_value=None)
+        stop_notify = AsyncMock(return_value=None)
+
+        def __init__(self, _device, *, ttlock_client_created, **_kwargs):
+            created.append(self)
+            ttlock_client_created(self)
+
+        async def connect(self, **_kwargs):
+            self.attempts += 1
+            if self.attempts < 3:
+                raise BleakError("le-connection-abort-by-local")
+            self.is_connected = True
+
+        async def disconnect(self):
+            self.is_connected = False
+
+    monkeypatch.setattr(client_module, "_OwnedBleakClient", Backend)
+    monkeypatch.setattr(connector, "IS_LINUX", False)
+    monkeypatch.setattr(connector, "_has_valid_services_in_cache", AsyncMock(return_value=False))
+    monkeypatch.setattr(connector, "wait_for_disconnect", AsyncMock(return_value=None))
+    monkeypatch.setattr(client_module, "_POST_NOTIFY_SETTLE", 0)
+    client = TTLockClient(make_virtual_key(), device=MagicMock(), connect_attempts=1)
+    client._discover_chars = AsyncMock(return_value=None)
+    client._notify_char = MagicMock()
+    client._wake_battery_read = AsyncMock(return_value=None)
+    await client.connect()
+
+    assert len(created) == 1
+    assert created[0].attempts == 3
+    assert client._client is created[0]
+    assert client.connection_cleanup_confirmed is False
     await client.disconnect()
     assert client.connection_cleanup_confirmed is True
