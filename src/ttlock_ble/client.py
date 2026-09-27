@@ -166,7 +166,11 @@ class TTLockClient:
         completed successfully and its public connected flag was false. An
         unassigned client after an attempted setup is deliberately uncertain.
         """
-        return self._connection_cleanup_confirmed and not self._connection_acquiring
+        return (
+            self._connection_cleanup_confirmed
+            and not self._connection_acquiring
+            and self._client is None
+        )
 
     def _own_bleak_client(self, client: BleakClient) -> None:
         """Keep the backend handle even if establishment never returns it."""
