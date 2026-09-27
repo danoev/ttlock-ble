@@ -76,7 +76,7 @@ def parse_check_user_time_response(plaintext: bytes) -> int:
     """
     _cmd_echo, status, data = parse_response_status(plaintext)
     if status != RESPONSE_SUCCESS:
-        raise RuntimeError(f"checkUserTime FAILED: status={status:#x} err={data.hex()}")
+        raise RuntimeError(f"checkUserTime FAILED: status={status:#x} error_bytes={len(data)}")
     if len(data) < 4:
-        raise ValueError(f"checkUserTime payload too short: {plaintext.hex()}")
+        raise ValueError(f"checkUserTime payload too short: {len(plaintext)} bytes")
     return int.from_bytes(data[:4], "big")

@@ -292,15 +292,15 @@ class TTLockClient:
             plain = self._decrypt_response(resp, "calibrate_time")
             echo, status, data = self._parse_response_envelope(plain, "calibrate_time")
             log.info(
-                "calibrate_time response: cmd_echo=0x%02x status=%d data=%s",
+                "calibrate_time response: cmd_echo=0x%02x status=%d data_bytes=%d",
                 echo,
                 status,
-                data.hex(),
+                len(data),
             )
             if status != cmd.RESPONSE_SUCCESS:
                 raise TTLockError(
                     f"Failed to calibrate lock time: lock rejected with "
-                    f"status={status:#x}, error={data.hex()}"
+                    f"status={status:#x}, error_bytes={len(data)}"
                 )
 
     async def get_lock_time(self) -> dt.datetime:
@@ -384,7 +384,7 @@ class TTLockClient:
             ).encrypt_data(self._aes_key)
             resp = await self._exchange(frame)
             plain = self._decrypt_response(resp, "query_state")
-            log.debug("state response plaintext: %s", plain.hex())
+            log.debug("state response: payload_bytes=%d", len(plain))
             try:
                 return cmd.parse_lock_status(plain), cmd.parse_state_battery(plain)
             except ValueError as error:
@@ -482,7 +482,7 @@ class TTLockClient:
                 ).encrypt_data(self._aes_key)
                 resp = await self._exchange(frame)
                 plain = self._decrypt_response(resp, "operate_log")
-                log.debug("operate_log response plaintext: %s", plain.hex())
+                log.debug("operate_log response: payload_bytes=%d", len(plain))
                 try:
                     page, last_seq = cmd.parse_operate_log_response(plain)
                 except ValueError as error:
@@ -629,7 +629,7 @@ class TTLockClient:
             log.debug("Battery read skipped", exc_info=True)
 
     def _on_notify(self, _char: BleakGATTCharacteristic, data: bytearray) -> None:
-        log.debug("RX %s", bytes(data).hex())
+        log.debug("RX notification: %d bytes", len(data))
         for frame in self._reassembler.feed(bytes(data)):
             if self._waiting_for_response > 0:
                 self._inbox.put_nowait(frame)
@@ -644,7 +644,12 @@ class TTLockClient:
             plain = aes_decrypt(frame.data, self._aes_key)
             echo, status, data = cmd.parse_response_status(plain)
         except (ValueError, RuntimeError) as exc:
-            log.warning("Could not decode push event (%s): %s", exc, frame.data.hex())
+            log.warning(
+                "Could not decode push event (error_type=%s, cmd=0x%02x, data_bytes=%d)",
+                type(exc).__name__,
+                frame.command,
+                len(frame.data),
+            )
             return
         event = LockEvent.from_payload(echo, status, data)
         for listener in list(self._event_listeners):
@@ -657,7 +662,7 @@ class TTLockClient:
         assert self._client is not None
         assert self._write_char is not None
         wire = frame.build()
-        log.debug("TX %s (%d bytes)", wire.hex(), len(wire))
+        log.debug("TX cmd=0x%02x (%d bytes)", frame.command, len(wire))
         for i in range(0, len(wire), _BLE_WRITE_CHUNK):
             await self._client.write_gatt_char(
                 self._write_char,
@@ -763,17 +768,17 @@ class TTLockClient:
         )
         resp = await self._exchange(frame)
         log.debug(
-            "check_user_time response: cmd=0x%02x encrypt=0x%02x data=%s",
+            "check_user_time response: cmd=0x%02x encrypt=0x%02x data_bytes=%d",
             resp.command,
             resp.encrypt,
-            resp.data.hex(),
+            len(resp.data),
         )
         plain = self._decrypt_response(resp, "check_user_time")
         try:
             ps = cmd.parse_check_user_time_response(plain)
         except (RuntimeError, ValueError) as error:
             raise TTLockError(f"Failed to validate virtual key with lock: {error}") from error
-        log.info("psFromLock = 0x%08x", ps)
+        log.info("CHECK_USER_TIME authentication succeeded")
         return ps
 
     async def _auto_lock_exchange(self, payload: bytes) -> tuple[int, int | None]:
@@ -782,7 +787,7 @@ class TTLockClient:
         ).encrypt_data(self._aes_key)
         resp = await self._exchange(frame)
         plain = self._decrypt_response(resp, "auto_lock")
-        log.debug("auto_lock response plaintext: %s", plain.hex())
+        log.debug("auto_lock response: payload_bytes=%d", len(plain))
         try:
             return cmd.parse_auto_lock_response(plain)
         except ValueError as error:
@@ -796,15 +801,15 @@ class TTLockClient:
         plain = self._decrypt_response(resp, label)
         echo, status, data = self._parse_response_envelope(plain, label)
         log.info(
-            "%s response: cmd_echo=0x%02x status=%d data=%s",
+            "%s response: cmd_echo=0x%02x status=%d data_bytes=%d",
             label,
             echo,
             status,
-            data.hex(),
+            len(data),
         )
         if status != cmd.RESPONSE_SUCCESS:
             raise TTLockError(
-                f"Failed to {label}: lock rejected with status={status:#x}, error={data.hex()}"
+                f"Failed to {label}: lock rejected with status={status:#x}, error_bytes={len(data)}"
             )
 
     async def _control_lock(self, opcode: int, ps: int, label: str) -> None:
@@ -817,13 +822,13 @@ class TTLockClient:
         plain = self._decrypt_response(resp, label)
         echo, status, data = self._parse_response_envelope(plain, label)
         log.info(
-            "%s response: cmd_echo=0x%02x status=%d data=%s",
+            "%s response: cmd_echo=0x%02x status=%d data_bytes=%d",
             label,
             echo,
             status,
-            data.hex(),
+            len(data),
         )
         if status != cmd.RESPONSE_SUCCESS:
             raise TTLockError(
-                f"Failed to {label}: lock rejected with status={status:#x}, error={data.hex()}"
+                f"Failed to {label}: lock rejected with status={status:#x}, error_bytes={len(data)}"
             )
