@@ -113,3 +113,31 @@ def test_parser_errors_do_not_include_decrypted_payload():
             parser(payload)
         assert payload.hex() not in str(caught.value)
         assert "PIN-864209" not in str(caught.value)
+
+
+@pytest.mark.parametrize("payload", [b"PIN-864209", b"\x7f\x5a\x05PIN"])
+def test_invalid_wire_frame_errors_do_not_expose_payload(payload):
+    with pytest.raises(ValueError) as caught:
+        Frame.parse(payload)
+    assert payload.hex() not in str(caught.value)
+    assert "PIN" not in str(caught.value)
+    assert f"{len(payload)} bytes" in str(caught.value)
+
+
+def test_invalid_push_diagnostics_do_not_expose_credentials(monkeypatch, caplog):
+    key = make_virtual_key()
+    client = TTLockClient(key, device=MagicMock())
+    client.add_event_listener(lambda _event: None)
+    secret = b"PIN-864209|ADMIN-SECRET"
+    monkeypatch.setattr("ttlock_ble.client.aes_decrypt", lambda *_args: secret)
+    monkeypatch.setattr(
+        cmd,
+        "parse_response_status",
+        MagicMock(side_effect=ValueError(secret.hex())),
+    )
+    frame = Frame.for_lock(key.lockVersion, cmd.CMD_RESPONSE, secret)
+    with caplog.at_level(logging.DEBUG, logger="ttlock_ble.client"):
+        client._dispatch_event(frame)
+    assert "error_type=ValueError" in caplog.text
+    assert secret.hex() not in caplog.text
+    assert secret.decode() not in caplog.text
