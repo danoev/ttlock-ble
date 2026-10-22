@@ -530,6 +530,14 @@ class TTLockClient:
             plain[0] if plain is not None and len(plain) >= 2 else None,
             plain[1] if plain is not None and len(plain) >= 2 else None,
             category,
+            pin_short_end_marker_matches=(
+                plain[2:] == b"\x00\x00"
+                if method == "keypad_pin"
+                and plain is not None
+                and len(plain) == 4
+                and plain[:2] == bytes([cmd.CMD_GET_PASSCODES, cmd.RESPONSE_SUCCESS])
+                else None
+            ),
         )
         log.debug("Inventory response metadata: %s", diagnostic)
         return diagnostic
@@ -609,6 +617,13 @@ class TTLockClient:
                         limitation=_PIN_COVERAGE_LIMIT,
                         skipped_unknown=skipped,
                         reason=InventoryReason.INCOMPLETE,
+                        diagnostic=(
+                            self._inventory_diagnostic(
+                                "keypad_pin", page, cursor, plain, InventoryReason.INCOMPLETE
+                            )
+                            if len(plain) == 4
+                            else None
+                        ),
                     )
                 cursor = next_cursor
             return InventoryResult(

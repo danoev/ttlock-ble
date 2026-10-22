@@ -15,7 +15,9 @@ from ttlock_ble import commands as cmd
 from ttlock_ble.models import InventoryParseError
 
 
-@pytest.mark.parametrize("wire", [b"\x00\x00", b"\x07\x01", b"\x07\x01\x00\x00\x00\x00"])
+@pytest.mark.parametrize(
+    "wire", [b"\x00\x00", b"\x07\x01", b"\x07\x01\x00\x00", b"\x07\x01\x00\x00\x00\x00"]
+)
 def test_only_known_pin_terminators_are_accepted(wire: bytes) -> None:
     assert cmd.parse_passcode_list_response(wire) == (None, 0, False)
 
@@ -28,7 +30,7 @@ def test_only_known_pin_terminators_are_accepted(wire: bytes) -> None:
         (b"\x07\x00\x1a", InventoryReason.REJECTED),
         (b"\x06\x01", InventoryReason.LAYOUT),
         (b"\x07\x01\x00", InventoryReason.TRUNCATED),
-        (b"\x07\x01\x00\x00", InventoryReason.TRUNCATED),
+        (b"\x07\x01\x00\x01", InventoryReason.TRUNCATED),
         (b"\x07\x01\x00\x00\x00", InventoryReason.TRUNCATED),
         (b"\x07\x01\x00\x00\x00\x00\x01", InventoryReason.TRUNCATED),
     ],
