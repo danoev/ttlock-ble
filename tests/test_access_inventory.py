@@ -174,6 +174,18 @@ async def test_pin_transport_interruption_keeps_only_partial_metadata() -> None:
     assert not client._command_lock.locked()
 
 
+async def test_malformed_admin_challenge_key_does_not_escape_in_traceback() -> None:
+    key = make_virtual_key()
+    key.unlockKey = "synthetic-private-key"
+    client = TTLockClient(key, device=MagicMock())
+    client._exchange = AsyncMock(  # type: ignore[method-assign]
+        return_value=_resp_frame(key, cmd.CMD_CHECK_ADMIN, _response(cmd.CMD_CHECK_ADMIN, bytes(4)))
+    )
+    with pytest.raises(TTLockError) as error:
+        await client.get_cards()
+    assert "synthetic-private-key" not in "".join(traceback.format_exception(error.value))
+
+
 async def test_real_encrypted_ble_handshake_and_indexed_read(patched_connect) -> None:
     key = make_virtual_key()
     client = TTLockClient(key, device=MagicMock(), keep_alive_after_command=0)

@@ -461,6 +461,14 @@ class TTLockClient:
         """Authorize read-only inventory before sending any list opcode."""
         if not self.key.adminPs or not self.key.adminPs.isdecimal():
             raise TTLockError("Credential inventory requires an admin password")
+        try:
+            await self._inventory_admin_challenge()
+        except Exception:  # noqa: BLE001
+            # Builders can also raise with credential input in their message.
+            raise TTLockError("Credential inventory admin authorization failed") from None
+
+    async def _inventory_admin_challenge(self) -> None:
+        """Perform one challenge under the inventory error-redaction boundary."""
         payload = cmd.payload_check_admin(self.key.uid, self.key.adminPs, self.key.lockFlagPos)
         plain = await self._inventory_exchange(cmd.CMD_CHECK_ADMIN, payload, "inventory_admin")
         echo, status, data = self._parse_response_envelope(plain, "inventory_admin")
