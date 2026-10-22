@@ -20,6 +20,7 @@ class InventoryResult:
     complete: bool
     limitation: str
     skipped_unknown: int = 0
+    transport_interrupted: bool = False
 
 
 class UnverifiedCardLayoutError(ValueError):

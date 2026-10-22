@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import traceback
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -138,6 +139,39 @@ async def test_transport_error_is_sanitized_and_later_failure_is_partial() -> No
     result = await client.get_cards()
     assert not result.complete and len(result.entries) == 1
     assert "private wire detail" not in repr(result)
+    assert result.transport_interrupted
+
+
+@pytest.mark.parametrize("phase", ["admin", "random", "page"])
+async def test_admin_transport_failure_traceback_is_credential_free(phase: str) -> None:
+    key = make_virtual_key()
+    client = TTLockClient(key, device=MagicMock())
+    replies = []
+    if phase != "admin":
+        replies.append(
+            _resp_frame(key, cmd.CMD_CHECK_ADMIN, _response(cmd.CMD_CHECK_ADMIN, bytes(4)))
+        )
+    if phase == "page":
+        replies.append(_resp_frame(key, cmd.CMD_CHECK_RANDOM, _response(cmd.CMD_CHECK_RANDOM)))
+    replies.append(OSError("synthetic-secret-frame"))
+    client._exchange = AsyncMock(side_effect=replies)  # type: ignore[method-assign]
+    with pytest.raises(TTLockError) as error:
+        await client.get_cards()
+    assert "synthetic-secret-frame" not in "".join(traceback.format_exception(error.value))
+
+
+async def test_pin_transport_interruption_keeps_only_partial_metadata() -> None:
+    client = TTLockClient(make_virtual_key(), device=MagicMock())
+    client._inventory_admin_handshake = AsyncMock()  # type: ignore[method-assign]
+    client._inventory_exchange = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[_pin(b"8675309", cursor=1), OSError("synthetic-secret-frame")]
+    )
+    result = await client.get_passcodes()
+    assert result.transport_interrupted
+    assert not result.complete and len(result.entries) == 1
+    assert "8675309" not in repr(result)
+    assert "synthetic-secret-frame" not in repr(result)
+    assert not client._command_lock.locked()
 
 
 async def test_real_encrypted_ble_handshake_and_indexed_read(patched_connect) -> None:

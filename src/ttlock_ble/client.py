@@ -462,26 +462,28 @@ class TTLockClient:
         if not self.key.adminPs or not self.key.adminPs.isdecimal():
             raise TTLockError("Credential inventory requires an admin password")
         payload = cmd.payload_check_admin(self.key.uid, self.key.adminPs, self.key.lockFlagPos)
-        frame = Frame.for_lock(self.key.lockVersion, cmd.CMD_CHECK_ADMIN, payload).encrypt_data(
-            self._aes_key
-        )
-        plain = self._decrypt_response(await self._exchange(frame), "inventory_admin")
+        plain = await self._inventory_exchange(cmd.CMD_CHECK_ADMIN, payload, "inventory_admin")
         echo, status, data = self._parse_response_envelope(plain, "inventory_admin")
         if echo != cmd.CMD_CHECK_ADMIN or status != cmd.RESPONSE_SUCCESS or len(data) < 4:
             raise TTLockError("Credential inventory admin authorization was rejected")
         token = int.from_bytes(data[:4], "big")
         random_payload = cmd.payload_check_random(token, self.key.unlockKey)
-        frame = Frame.for_lock(
-            self.key.lockVersion, cmd.CMD_CHECK_RANDOM, random_payload
-        ).encrypt_data(self._aes_key)
-        plain = self._decrypt_response(await self._exchange(frame), "inventory_random")
+        plain = await self._inventory_exchange(
+            cmd.CMD_CHECK_RANDOM, random_payload, "inventory_random"
+        )
         echo, status, _data = self._parse_response_envelope(plain, "inventory_random")
         if echo != cmd.CMD_CHECK_RANDOM or status != cmd.RESPONSE_SUCCESS:
             raise TTLockError("Credential inventory admin challenge was rejected")
 
     async def _inventory_exchange(self, opcode: int, payload: bytes, label: str) -> bytes:
-        frame = Frame.for_lock(self.key.lockVersion, opcode, payload).encrypt_data(self._aes_key)
-        return self._decrypt_response(await self._exchange(frame), label)
+        """Suppress potentially sensitive transport/decrypt exception chains."""
+        try:
+            frame = Frame.for_lock(self.key.lockVersion, opcode, payload).encrypt_data(
+                self._aes_key
+            )
+            return self._decrypt_response(await self._exchange(frame), label)
+        except Exception:  # noqa: BLE001
+            raise TTLockError("Credential inventory exchange failed") from None
 
     async def get_passcodes(self) -> InventoryResult:
         """Read only discoverable PIN metadata; never return a PIN value.
@@ -516,6 +518,7 @@ class TTLockClient:
                             complete=False,
                             limitation="PIN read interrupted",
                             skipped_unknown=skipped,
+                            transport_interrupted=True,
                         )
                     raise TTLockError("PIN inventory read failed") from None
                 try:
@@ -568,7 +571,10 @@ class TTLockClient:
                     # Never publish an incomplete list as complete.
                     if entries:
                         return InventoryResult(
-                            tuple(entries), complete=False, limitation="inventory read interrupted"
+                            tuple(entries),
+                            complete=False,
+                            limitation="inventory read interrupted",
+                            transport_interrupted=True,
                         )
                     raise TTLockError("Credential inventory read failed") from None
                 try:
