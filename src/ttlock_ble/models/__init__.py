@@ -11,6 +11,7 @@ from .access_inventory import (
     InventoryResult,
     UnverifiedCardLayoutError,
 )
+from .administration import AdministrativeInventory, AdministrativeRecord
 from .cloud_credentials import CloudCredentials
 from .lock_advertisement import LockAdvertisement
 from .lock_event import LockEvent
@@ -20,6 +21,8 @@ from .site_info import SiteInfo
 from .virtual_key import VirtualKey
 
 __all__ = [
+    "AdministrativeInventory",
+    "AdministrativeRecord",
     "CloudCredentials",
     "InventoryDiagnostic",
     "InventoryEntry",
