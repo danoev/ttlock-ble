@@ -226,3 +226,37 @@ uv run mypy src      # types
 ## License
 
 MIT — see [`LICENSE`](./LICENSE).
+
+### RC16 private administration API (not public telemetry)
+
+`await client.get_administrative_inventory(method)` is an explicit sensitive
+API for `keypad_pin`, `fingerprint` and four-byte `ic_card` records. Its
+`summary` is the existing credential-free inventory result; `records` contains
+raw identifiers **in memory only** (excluded from repr). Do not serialize this
+container, log it or put it on HA's service/event/WebSocket bus. Consumers must
+derive their scoped private references, discard the source and independently
+enforce administrator authorization. A reference is never authorization.
+`records_complete` also requires distinct successfully decoded records and no
+interruption/skipped layout. PIN cursor completion still omits unused
+batch/offline PINs. Observed date ranges are not exhaustive verified schedules.
+
+The independently implemented `commands.management_candidates` module builds
+**offline fixtures only**: PIN 03/05 modification; four-byte card 05 enrol(2),
+modify(5), delete(3); fingerprint 06 enrol(2), modify(5), delete(3), with its
+six-byte ID+slot composite. It has no BLE dispatcher. Every candidate reports
+`write_enabled=False`, `hardware_validated=False`. Responses classify only
+rejection/envelope/enrolment progress, never physical success; no retry or
+rollback is authorized. PIN modify is one candidate opcode, never delete/add.
+
+Protocol facts were inspected at
+[kind3r/ttlock-sdk-js 8c84cda](https://github.com/kind3r/ttlock-sdk-js/tree/8c84cda63828d7f36f464ff02ad680de76dd1d57/src/api/Commands)
+(GPL-3.0 reference; no code copied). Existing inventory parsers retain their MIT
+upstream provenance. Official [TTLock Android SDK](https://github.com/ttlock/Android_SDK_Demo)
+provides public management APIs but does not validate these raw wire contracts.
+S31 write authentication/challenge order, payload compatibility, enrolment
+termination/cancellation and acknowledgement semantics remain **unverified**.
+An admin inventory handshake alone does not establish write authorization.
+A future write must authenticate explicitly, send at most once, retain cleanup
+ownership and reconcile ambiguity with a fresh read. Never change an established
+household credential for initial testing. Eight-byte card IDs and cyclic
+schedule writes are unsupported.

@@ -13,6 +13,7 @@ from bleak import BleakClient, BleakScanner
 from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
 
 from . import commands as cmd
+from .commands.administrative_records import parse_administrative_record
 from .constants import KeyboardPwdType, LockState
 from .crypto import aes_decrypt, hex_key_to_bytes
 from .exceptions import TTLockError
@@ -27,6 +28,7 @@ from .models import (
     LogEntry,
     UnverifiedCardLayoutError,
 )
+from .models.administration import AdministrativeInventory, AdministrativeRecord
 from .protocol import Frame, FrameReassembler
 
 if TYPE_CHECKING:
@@ -542,7 +544,9 @@ class TTLockClient:
         log.debug("Inventory response metadata: %s", diagnostic)
         return diagnostic
 
-    async def get_passcodes(self) -> InventoryResult:
+    async def get_passcodes(
+        self, *, _records: list[AdministrativeRecord] | None = None
+    ) -> InventoryResult:
         """Read only discoverable PIN metadata; never return a PIN value.
 
         CMD 0x07 omits active batch/offline PINs until first physical use.
@@ -609,6 +613,7 @@ class TTLockClient:
                     raise InventoryError(category, "inventory", diagnostic) from None
                 if item is not None:
                     entries.append(item)
+                    self._collect_administrative_record(_records, "keypad_pin", plain)
                 skipped += int(unknown)
                 if next_cursor == 0:
                     return InventoryResult(
@@ -641,6 +646,7 @@ class TTLockClient:
         operation: int,
         label: str,
         parser: Callable[[bytes], InventoryEntry | None],
+        records: list[AdministrativeRecord] | None = None,
     ) -> InventoryResult:
         async with self._command_lock:
             await self._inventory_admin_handshake()
@@ -706,6 +712,9 @@ class TTLockClient:
                         reason=InventoryReason.CURSOR,
                     )
                 entries.append(item)
+                self._collect_administrative_record(
+                    records, "fingerprint" if opcode == 6 else "ic_card", plain
+                )
             return InventoryResult(
                 tuple(entries),
                 complete=False,
@@ -713,23 +722,55 @@ class TTLockClient:
                 reason=InventoryReason.LIMIT,
             )
 
-    async def get_fingerprints(self) -> InventoryResult:
+    async def get_fingerprints(
+        self, *, _records: list[AdministrativeRecord] | None = None
+    ) -> InventoryResult:
         """Read indexed fingerprint validity without returning biometric IDs or slots."""
         return await self._get_indexed_inventory(
             opcode=cmd.CMD_MANAGE_FINGERPRINT,
             operation=6,
             label="get_fingerprints",
             parser=cmd.parse_fingerprint_list_response,
+            records=_records,
         )
 
-    async def get_cards(self) -> InventoryResult:
+    async def get_cards(
+        self, *, _records: list[AdministrativeRecord] | None = None
+    ) -> InventoryResult:
         """Read four-byte IC-card records; explicitly reject the unverified layout."""
         return await self._get_indexed_inventory(
             opcode=cmd.CMD_MANAGE_IC_CARD,
             operation=1,
             label="get_cards",
             parser=cmd.parse_card_list_response,
+            records=_records,
         )
+
+    @staticmethod
+    def _collect_administrative_record(
+        records: list[AdministrativeRecord] | None, method: str, plain: bytes
+    ) -> None:
+        if records is not None:
+            # A decode mismatch cannot leak data or certify completeness.
+            with contextlib.suppress(ValueError, RuntimeError):
+                records.append(parse_administrative_record(method, plain))
+
+    async def get_administrative_inventory(self, method: str) -> AdministrativeInventory:
+        """Opt-in sensitive records for a separate authenticated admin boundary.
+
+        Never pass this container to generic diagnostics, dataclass serializers,
+        service responses or logs. Public inventory APIs still discard identifiers.
+        """
+        records: list[AdministrativeRecord] = []
+        if method == "keypad_pin":
+            summary = await self.get_passcodes(_records=records)
+        elif method == "fingerprint":
+            summary = await self.get_fingerprints(_records=records)
+        elif method == "ic_card":
+            summary = await self.get_cards(_records=records)
+        else:
+            raise ValueError("Unknown administrative inventory method")
+        return AdministrativeInventory(summary, tuple(records))
 
     async def get_operation_log(
         self,

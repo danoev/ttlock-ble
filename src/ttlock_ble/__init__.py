@@ -36,8 +36,11 @@ from .models import (
     UnverifiedCardLayoutError,
     VirtualKey,
 )
+from .models.administration import AdministrativeInventory, AdministrativeRecord
 
 __all__ = [
+    "AdministrativeInventory",
+    "AdministrativeRecord",
     "AutoLockOperate",
     "CloudError",
     "InventoryDiagnostic",
