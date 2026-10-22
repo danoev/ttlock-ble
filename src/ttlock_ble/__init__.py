@@ -22,11 +22,23 @@ from .client import TTLockClient
 from .cloud import TTLockCloud
 from .constants import AutoLockOperate, KeyboardPwdType, LockState, LogOperate, PwdOperateType
 from .exceptions import CloudError, TTLockError
-from .models import LockAdvertisement, LockEvent, LockVersion, LogEntry, SiteInfo, VirtualKey
+from .models import (
+    InventoryEntry,
+    InventoryResult,
+    LockAdvertisement,
+    LockEvent,
+    LockVersion,
+    LogEntry,
+    SiteInfo,
+    UnverifiedCardLayoutError,
+    VirtualKey,
+)
 
 __all__ = [
     "AutoLockOperate",
     "CloudError",
+    "InventoryEntry",
+    "InventoryResult",
     "KeyboardPwdType",
     "LockAdvertisement",
     "LockEvent",
@@ -39,5 +51,6 @@ __all__ = [
     "TTLockClient",
     "TTLockCloud",
     "TTLockError",
+    "UnverifiedCardLayoutError",
     "VirtualKey",
 ]
