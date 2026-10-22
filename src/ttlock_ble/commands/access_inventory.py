@@ -50,6 +50,11 @@ def parse_passcode_list_response(plaintext: bytes) -> tuple[InventoryEntry | Non
     if plaintext == b"\x00\x00":  # captured bare end-of-list marker
         return None, 0, False
     data = _data(plaintext, 7)
+    # Upstream's hardware fixture _real_plain("0000") adds echo/SUCCESS:
+    # the captured two-byte DATA marker is a four-byte full response.
+    # Match it exactly; other short SUCCESS payloads are still truncated.
+    if data == b"\x00\x00":
+        return None, 0, False
     if len(data) == 0:  # captured bare [echo][success] terminator
         return None, 0, False
     if len(data) < 4:

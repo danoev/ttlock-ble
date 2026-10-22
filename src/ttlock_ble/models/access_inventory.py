@@ -34,6 +34,9 @@ class InventoryDiagnostic:
     command_echo: int | None
     response_status: int | None
     category: InventoryReason
+    # One predicate, not the undisclosed data bytes or a credential identifier.
+    # None means this was not a CMD 0x07 four-byte SUCCESS response.
+    pin_short_end_marker_matches: bool | None = None
 
 
 class InventoryError(TTLockError):

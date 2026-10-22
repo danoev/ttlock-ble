@@ -189,11 +189,28 @@ transport/decryption exceptions are not chained into public inventory errors.
 Response metadata contains only method, zero-based page, query cursor/index,
 length, echo, status and category. Never log or retain decrypted frames.
 
-On the S31, one PIN was observed but enumeration remains partial; fingerprint
-and four-byte card counts were corroborated (two each). No S31 response capture
-establishes its unrecognised PIN termination. Strict truncation/status checks
-remain unchanged; count equality never establishes completion. The new synthetic
-fixtures are regression evidence, not claimed S31 captures.
+RC15 corrects an envelope distinction in upstream's hardware fixture:
+`tests/test_commands.py::_real_plain("0000")` prepends CMD `07` and SUCCESS `01`.
+The captured two-byte **data** marker therefore occupies four bytes in the full
+response. The parser now accepts exactly that wrapped marker, with echo/status
+validation, while all other short payloads remain rejected. Upstream's broader
+`len(data) < 4` fallback is deliberately not adopted. Existing two-byte terminal
+forms and full cursor traversal remain supported.
+
+Source: [upstream 8025f57 tests](https://github.com/roquerodrigo/ttlock-ble/blob/8025f57cebc7de63a66035fd19e1efb042d0208f/tests/test_commands.py)
+and its [encrypted capture replay](https://github.com/roquerodrigo/ttlock-ble/blob/8025f57cebc7de63a66035fd19e1efb042d0208f/tests/test_client_ble.py).
+Original MIT authorship is preserved; no GPL implementation was copied.
+
+The S31 supplied a four-byte SUCCESS after one record at query cursor 336, but
+its remaining two bytes were not supplied. They are **not assumed** to match.
+`pin_short_end_marker_matches` is true only for the exact known wrapped marker,
+false for a different four-byte CMD 07 SUCCESS, and null for other shapes.
+Matching termination is reported with safe metadata as well as `complete=True`;
+unmatched data stays partial or raises a sanitised error before any entry.
+No raw remaining bytes or hashes of them are exposed. PIN coverage still omits
+unused offline/batch PINs, so reaching a validated terminator does not establish
+complete access coverage or a person's identity. S31 confirmation requires the
+next separately authorised read-only hardware test.
 
 ## Development
 
