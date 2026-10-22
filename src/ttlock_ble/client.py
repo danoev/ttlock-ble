@@ -16,7 +16,7 @@ from . import commands as cmd
 from .constants import KeyboardPwdType, LockState
 from .crypto import aes_decrypt, hex_key_to_bytes
 from .exceptions import TTLockError
-from .models import LockEvent, LogEntry
+from .models import InventoryEntry, InventoryResult, LockEvent, LogEntry, UnverifiedCardLayoutError
 from .protocol import Frame, FrameReassembler
 
 if TYPE_CHECKING:
@@ -53,6 +53,15 @@ _CONNECT_RETRY_DELAY = 1.0
 _POST_NOTIFY_SETTLE = 0.5
 _DEFAULT_KEEP_ALIVE_SECONDS = 25.0
 _KEEP_ALIVE_INTERVAL = 2.0
+_MAX_INVENTORY_ROUND_TRIPS = 300
+
+_PIN_COVERAGE_LIMIT = (
+    "CMD 0x07 does not show unused batch/offline PINs; returned items are not a complete "
+    "list of active keypad credentials"
+)
+_CYCLIC_COVERAGE_LIMIT = (
+    "Cyclic day/time restrictions use a separate command and are not visible to this query"
+)
 
 
 class _OwnedBleakClient(BleakClientWithServiceCache):
@@ -447,6 +456,181 @@ class TTLockClient:
                 cmd.payload_passcode_clear(),
                 "clear_passcodes",
             )
+
+    async def _inventory_admin_handshake(self) -> None:
+        """Authorize read-only inventory before sending any list opcode."""
+        if not self.key.adminPs or not self.key.adminPs.isdecimal():
+            raise TTLockError("Credential inventory requires an admin password")
+        try:
+            await self._inventory_admin_challenge()
+        except Exception:  # noqa: BLE001
+            # Builders can also raise with credential input in their message.
+            raise TTLockError("Credential inventory admin authorization failed") from None
+
+    async def _inventory_admin_challenge(self) -> None:
+        """Perform one challenge under the inventory error-redaction boundary."""
+        payload = cmd.payload_check_admin(self.key.uid, self.key.adminPs, self.key.lockFlagPos)
+        plain = await self._inventory_exchange(cmd.CMD_CHECK_ADMIN, payload, "inventory_admin")
+        echo, status, data = self._parse_response_envelope(plain, "inventory_admin")
+        if echo != cmd.CMD_CHECK_ADMIN or status != cmd.RESPONSE_SUCCESS or len(data) < 4:
+            raise TTLockError("Credential inventory admin authorization was rejected")
+        token = int.from_bytes(data[:4], "big")
+        random_payload = cmd.payload_check_random(token, self.key.unlockKey)
+        plain = await self._inventory_exchange(
+            cmd.CMD_CHECK_RANDOM, random_payload, "inventory_random"
+        )
+        echo, status, _data = self._parse_response_envelope(plain, "inventory_random")
+        if echo != cmd.CMD_CHECK_RANDOM or status != cmd.RESPONSE_SUCCESS:
+            raise TTLockError("Credential inventory admin challenge was rejected")
+
+    async def _inventory_exchange(self, opcode: int, payload: bytes, label: str) -> bytes:
+        """Suppress potentially sensitive transport/decrypt exception chains."""
+        try:
+            frame = Frame.for_lock(self.key.lockVersion, opcode, payload).encrypt_data(
+                self._aes_key
+            )
+            return self._decrypt_response(await self._exchange(frame), label)
+        except Exception:  # noqa: BLE001
+            raise TTLockError("Credential inventory exchange failed") from None
+
+    async def get_passcodes(self) -> InventoryResult:
+        """Read only discoverable PIN metadata; never return a PIN value.
+
+        CMD 0x07 omits active batch/offline PINs until first physical use.
+        This result therefore always carries an explicit coverage limitation.
+        """
+        async with self._command_lock:
+            await self._inventory_admin_handshake()
+            entries: list[InventoryEntry] = []
+            skipped = 0
+            cursor = 0
+            seen: set[int] = set()
+            for _ in range(_MAX_INVENTORY_ROUND_TRIPS):
+                if cursor in seen:
+                    return InventoryResult(
+                        tuple(entries),
+                        complete=False,
+                        limitation="PIN cursor repeated",
+                        skipped_unknown=skipped,
+                    )
+                seen.add(cursor)
+                try:
+                    plain = await self._inventory_exchange(
+                        cmd.CMD_GET_PASSCODES, cmd.payload_passcode_list(cursor), "get_passcodes"
+                    )
+                except Exception:  # noqa: BLE001
+                    # Preserve only credential-free partial evidence.
+                    if entries:
+                        return InventoryResult(
+                            tuple(entries),
+                            complete=False,
+                            limitation="PIN read interrupted",
+                            skipped_unknown=skipped,
+                            transport_interrupted=True,
+                        )
+                    raise TTLockError("PIN inventory read failed") from None
+                try:
+                    item, next_cursor, unknown = cmd.parse_passcode_list_response(plain)
+                except (ValueError, RuntimeError) as exc:
+                    if entries:
+                        return InventoryResult(
+                            tuple(entries),
+                            complete=False,
+                            limitation="PIN response unrecognized",
+                            skipped_unknown=skipped,
+                        )
+                    raise TTLockError(
+                        "PIN inventory response was rejected or unrecognized"
+                    ) from exc
+                if item is not None:
+                    entries.append(item)
+                skipped += int(unknown)
+                if next_cursor == 0:
+                    return InventoryResult(
+                        tuple(entries),
+                        complete=True,
+                        limitation=_PIN_COVERAGE_LIMIT,
+                        skipped_unknown=skipped,
+                    )
+                cursor = next_cursor
+            return InventoryResult(
+                tuple(entries),
+                complete=False,
+                limitation="PIN inventory safety cap reached",
+                skipped_unknown=skipped,
+            )
+
+    async def _get_indexed_inventory(
+        self,
+        *,
+        opcode: int,
+        operation: int,
+        label: str,
+        parser: Callable[[bytes], InventoryEntry | None],
+    ) -> InventoryResult:
+        async with self._command_lock:
+            await self._inventory_admin_handshake()
+            entries: list[InventoryEntry] = []
+            for index in range(_MAX_INVENTORY_ROUND_TRIPS):
+                payload = bytes([operation]) + index.to_bytes(2, "big")
+                try:
+                    plain = await self._inventory_exchange(opcode, payload, label)
+                except Exception:  # noqa: BLE001
+                    # Never publish an incomplete list as complete.
+                    if entries:
+                        return InventoryResult(
+                            tuple(entries),
+                            complete=False,
+                            limitation="inventory read interrupted",
+                            transport_interrupted=True,
+                        )
+                    raise TTLockError("Credential inventory read failed") from None
+                try:
+                    item = parser(plain)
+                except UnverifiedCardLayoutError:
+                    return InventoryResult(
+                        tuple(entries),
+                        complete=False,
+                        limitation="eight-byte IC-card layout unverified",
+                    )
+                except (ValueError, RuntimeError) as exc:
+                    if entries:
+                        return InventoryResult(
+                            tuple(entries),
+                            complete=False,
+                            limitation="inventory response unrecognized",
+                        )
+                    raise TTLockError(f"{label} response was rejected or unrecognized") from exc
+                if item is None:
+                    return InventoryResult(
+                        tuple(entries), complete=True, limitation=_CYCLIC_COVERAGE_LIMIT
+                    )
+                if int.from_bytes(plain[4:6], "big") != index + 1:
+                    return InventoryResult(
+                        tuple(entries), complete=False, limitation="inventory position repeated"
+                    )
+                entries.append(item)
+            return InventoryResult(
+                tuple(entries), complete=False, limitation="inventory safety cap reached"
+            )
+
+    async def get_fingerprints(self) -> InventoryResult:
+        """Read indexed fingerprint validity without returning biometric IDs or slots."""
+        return await self._get_indexed_inventory(
+            opcode=cmd.CMD_MANAGE_FINGERPRINT,
+            operation=6,
+            label="get_fingerprints",
+            parser=cmd.parse_fingerprint_list_response,
+        )
+
+    async def get_cards(self) -> InventoryResult:
+        """Read four-byte IC-card records; explicitly reject the unverified layout."""
+        return await self._get_indexed_inventory(
+            opcode=cmd.CMD_MANAGE_IC_CARD,
+            operation=1,
+            label="get_cards",
+            parser=cmd.parse_card_list_response,
+        )
 
     async def get_operation_log(
         self,

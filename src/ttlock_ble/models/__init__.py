@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .access_inventory import InventoryEntry, InventoryResult, UnverifiedCardLayoutError
 from .cloud_credentials import CloudCredentials
 from .lock_advertisement import LockAdvertisement
 from .lock_event import LockEvent
@@ -12,10 +13,13 @@ from .virtual_key import VirtualKey
 
 __all__ = [
     "CloudCredentials",
+    "InventoryEntry",
+    "InventoryResult",
     "LockAdvertisement",
     "LockEvent",
     "LockVersion",
     "LogEntry",
     "SiteInfo",
+    "UnverifiedCardLayoutError",
     "VirtualKey",
 ]

@@ -63,6 +63,11 @@ class TestPayloadBuilders:
         with pytest.raises(ValueError, match="4-9 digits"):
             cmd.payload_passcode_add(int(KeyboardPwdType.PERMANENT), "12")
 
+    def test_passcode_validation_does_not_echo_credential(self) -> None:
+        with pytest.raises(ValueError) as error:
+            cmd.payload_passcode_delete(int(KeyboardPwdType.PERMANENT), "12xSECRET")
+        assert "12xSECRET" not in str(error.value)
+
     def test_passcode_delete_and_clear(self) -> None:
         assert cmd.payload_passcode_delete(int(KeyboardPwdType.PERMANENT), "1234")
         assert len(cmd.payload_passcode_clear()) == 1
