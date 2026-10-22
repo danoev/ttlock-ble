@@ -201,16 +201,21 @@ Source: [upstream 8025f57 tests](https://github.com/roquerodrigo/ttlock-ble/blob
 and its [encrypted capture replay](https://github.com/roquerodrigo/ttlock-ble/blob/8025f57cebc7de63a66035fd19e1efb042d0208f/tests/test_client_ble.py).
 Original MIT authorship is preserved; no GPL implementation was copied.
 
-The S31 supplied a four-byte SUCCESS after one record at query cursor 336, but
-its remaining two bytes were not supplied. They are **not assumed** to match.
+The original RC14 S31 report omitted the final two bytes, so no match was
+assumed then. The administrator has now supplied a successful RC15 S31 result:
+one permanent PIN matching the app, cursor336, four-byte terminal predicate true,
+`enumeration_complete=true`, no transport interruption, confirmed cleanup and
+4,340ms. Fingerprint2 and four-byte card2 also match the app. No raw identifiers
+or terminal bytes were needed in that report.
 `pin_short_end_marker_matches` is true only for the exact known wrapped marker,
 false for a different four-byte CMD 07 SUCCESS, and null for other shapes.
 Matching termination is reported with safe metadata as well as `complete=True`;
 unmatched data stays partial or raises a sanitised error before any entry.
 No raw remaining bytes or hashes of them are exposed. PIN coverage still omits
 unused offline/batch PINs, so reaching a validated terminator does not establish
-complete access coverage or a person's identity. S31 confirmation requires the
-next separately authorised read-only hardware test.
+complete access coverage or a person's identity. S31 read traversal is now
+corroborated; schedules, writes, other firmware and GATT adapter attribution
+remain unverified.
 
 ## Development
 
