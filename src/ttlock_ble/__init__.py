@@ -23,7 +23,10 @@ from .cloud import TTLockCloud
 from .constants import AutoLockOperate, KeyboardPwdType, LockState, LogOperate, PwdOperateType
 from .exceptions import CloudError, TTLockError
 from .models import (
+    InventoryDiagnostic,
     InventoryEntry,
+    InventoryError,
+    InventoryReason,
     InventoryResult,
     LockAdvertisement,
     LockEvent,
@@ -37,7 +40,10 @@ from .models import (
 __all__ = [
     "AutoLockOperate",
     "CloudError",
+    "InventoryDiagnostic",
     "InventoryEntry",
+    "InventoryError",
+    "InventoryReason",
     "InventoryResult",
     "KeyboardPwdType",
     "LockAdvertisement",

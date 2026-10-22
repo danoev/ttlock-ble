@@ -181,6 +181,20 @@ This SDK is the transport layer for the [`ha-ttlock-ble`](https://github.com/roq
 custom integration. The integration owns BLE discovery and feeds a `BLEDevice` into
 `TTLockClient.from_ble_device(...)`, so it never scans on its own.
 
+## Inventory diagnostics on the frozen 0.1.11 lineage
+
+Read-only inventory returns credential-free entries and closed `InventoryReason`
+values. `InventoryError` exposes a safe `stage` and optional `InventoryDiagnostic`;
+transport/decryption exceptions are not chained into public inventory errors.
+Response metadata contains only method, zero-based page, query cursor/index,
+length, echo, status and category. Never log or retain decrypted frames.
+
+On the S31, one PIN was observed but enumeration remains partial; fingerprint
+and four-byte card counts were corroborated (two each). No S31 response capture
+establishes its unrecognised PIN termination. Strict truncation/status checks
+remain unchanged; count equality never establishes completion. The new synthetic
+fixtures are regression evidence, not claimed S31 captures.
+
 ## Development
 
 See [`CODE_STYLE.md`](./CODE_STYLE.md) for project conventions.

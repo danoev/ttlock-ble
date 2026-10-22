@@ -16,7 +16,17 @@ from . import commands as cmd
 from .constants import KeyboardPwdType, LockState
 from .crypto import aes_decrypt, hex_key_to_bytes
 from .exceptions import TTLockError
-from .models import InventoryEntry, InventoryResult, LockEvent, LogEntry, UnverifiedCardLayoutError
+from .models import (
+    InventoryDiagnostic,
+    InventoryEntry,
+    InventoryError,
+    InventoryParseError,
+    InventoryReason,
+    InventoryResult,
+    LockEvent,
+    LogEntry,
+    UnverifiedCardLayoutError,
+)
 from .protocol import Frame, FrameReassembler
 
 if TYPE_CHECKING:
@@ -463,9 +473,11 @@ class TTLockClient:
             raise TTLockError("Credential inventory requires an admin password")
         try:
             await self._inventory_admin_challenge()
+        except InventoryError:
+            raise
         except Exception:  # noqa: BLE001
             # Builders can also raise with credential input in their message.
-            raise TTLockError("Credential inventory admin authorization failed") from None
+            raise InventoryError(InventoryReason.ADMIN_REJECTED, "admin") from None
 
     async def _inventory_admin_challenge(self) -> None:
         """Perform one challenge under the inventory error-redaction boundary."""
@@ -473,7 +485,7 @@ class TTLockClient:
         plain = await self._inventory_exchange(cmd.CMD_CHECK_ADMIN, payload, "inventory_admin")
         echo, status, data = self._parse_response_envelope(plain, "inventory_admin")
         if echo != cmd.CMD_CHECK_ADMIN or status != cmd.RESPONSE_SUCCESS or len(data) < 4:
-            raise TTLockError("Credential inventory admin authorization was rejected")
+            raise InventoryError(InventoryReason.ADMIN_REJECTED, "admin")
         token = int.from_bytes(data[:4], "big")
         random_payload = cmd.payload_check_random(token, self.key.unlockKey)
         plain = await self._inventory_exchange(
@@ -481,7 +493,7 @@ class TTLockClient:
         )
         echo, status, _data = self._parse_response_envelope(plain, "inventory_random")
         if echo != cmd.CMD_CHECK_RANDOM or status != cmd.RESPONSE_SUCCESS:
-            raise TTLockError("Credential inventory admin challenge was rejected")
+            raise InventoryError(InventoryReason.ADMIN_REJECTED, "admin")
 
     async def _inventory_exchange(self, opcode: int, payload: bytes, label: str) -> bytes:
         """Suppress potentially sensitive transport/decrypt exception chains."""
@@ -490,8 +502,37 @@ class TTLockClient:
                 self._aes_key
             )
             return self._decrypt_response(await self._exchange(frame), label)
+        except TimeoutError:
+            reason = (
+                InventoryReason.ADMIN_TIMEOUT
+                if label.startswith("inventory_")
+                else InventoryReason.TRANSPORT
+            )
+            raise InventoryError(
+                reason, "admin" if label.startswith("inventory_") else "inventory"
+            ) from None
         except Exception:  # noqa: BLE001
-            raise TTLockError("Credential inventory exchange failed") from None
+            raise InventoryError(
+                InventoryReason.TRANSPORT,
+                "admin" if label.startswith("inventory_") else "inventory",
+            ) from None
+
+    @staticmethod
+    def _inventory_diagnostic(
+        method: str, page: int, cursor: int, plain: bytes | None, category: InventoryReason
+    ) -> InventoryDiagnostic:
+        """Retain/log only shape, envelope and cursor information, never payload."""
+        diagnostic = InventoryDiagnostic(
+            {"get_cards": "ic_card", "get_fingerprints": "fingerprint"}.get(method, method),
+            page,
+            cursor,
+            len(plain) if plain is not None else None,
+            plain[0] if plain is not None and len(plain) >= 2 else None,
+            plain[1] if plain is not None and len(plain) >= 2 else None,
+            category,
+        )
+        log.debug("Inventory response metadata: %s", diagnostic)
+        return diagnostic
 
     async def get_passcodes(self) -> InventoryResult:
         """Read only discoverable PIN metadata; never return a PIN value.
@@ -505,13 +546,14 @@ class TTLockClient:
             skipped = 0
             cursor = 0
             seen: set[int] = set()
-            for _ in range(_MAX_INVENTORY_ROUND_TRIPS):
+            for page in range(_MAX_INVENTORY_ROUND_TRIPS):
                 if cursor in seen:
                     return InventoryResult(
                         tuple(entries),
                         complete=False,
                         limitation="PIN cursor repeated",
                         skipped_unknown=skipped,
+                        reason=InventoryReason.CURSOR,
                     )
                 seen.add(cursor)
                 try:
@@ -520,6 +562,9 @@ class TTLockClient:
                     )
                 except Exception:  # noqa: BLE001
                     # Preserve only credential-free partial evidence.
+                    diagnostic = self._inventory_diagnostic(
+                        "keypad_pin", page, cursor, None, InventoryReason.TRANSPORT
+                    )
                     if entries:
                         return InventoryResult(
                             tuple(entries),
@@ -527,21 +572,33 @@ class TTLockClient:
                             limitation="PIN read interrupted",
                             skipped_unknown=skipped,
                             transport_interrupted=True,
+                            reason=InventoryReason.TRANSPORT,
+                            diagnostic=diagnostic,
                         )
-                    raise TTLockError("PIN inventory read failed") from None
+                    raise InventoryError(
+                        InventoryReason.TRANSPORT, "inventory", diagnostic
+                    ) from None
                 try:
                     item, next_cursor, unknown = cmd.parse_passcode_list_response(plain)
                 except (ValueError, RuntimeError) as exc:
+                    category = (
+                        exc.reason
+                        if isinstance(exc, InventoryParseError)
+                        else InventoryReason.LAYOUT
+                    )
+                    diagnostic = self._inventory_diagnostic(
+                        "keypad_pin", page, cursor, plain, category
+                    )
                     if entries:
                         return InventoryResult(
                             tuple(entries),
                             complete=False,
                             limitation="PIN response unrecognized",
                             skipped_unknown=skipped,
+                            reason=category,
+                            diagnostic=diagnostic,
                         )
-                    raise TTLockError(
-                        "PIN inventory response was rejected or unrecognized"
-                    ) from exc
+                    raise InventoryError(category, "inventory", diagnostic) from None
                 if item is not None:
                     entries.append(item)
                 skipped += int(unknown)
@@ -551,6 +608,7 @@ class TTLockClient:
                         complete=True,
                         limitation=_PIN_COVERAGE_LIMIT,
                         skipped_unknown=skipped,
+                        reason=InventoryReason.INCOMPLETE,
                     )
                 cursor = next_cursor
             return InventoryResult(
@@ -558,6 +616,7 @@ class TTLockClient:
                 complete=False,
                 limitation="PIN inventory safety cap reached",
                 skipped_unknown=skipped,
+                reason=InventoryReason.LIMIT,
             )
 
     async def _get_indexed_inventory(
@@ -577,14 +636,21 @@ class TTLockClient:
                     plain = await self._inventory_exchange(opcode, payload, label)
                 except Exception:  # noqa: BLE001
                     # Never publish an incomplete list as complete.
+                    diagnostic = self._inventory_diagnostic(
+                        label, index, index, None, InventoryReason.TRANSPORT
+                    )
                     if entries:
                         return InventoryResult(
                             tuple(entries),
                             complete=False,
                             limitation="inventory read interrupted",
                             transport_interrupted=True,
+                            reason=InventoryReason.TRANSPORT,
+                            diagnostic=diagnostic,
                         )
-                    raise TTLockError("Credential inventory read failed") from None
+                    raise InventoryError(
+                        InventoryReason.TRANSPORT, "inventory", diagnostic
+                    ) from None
                 try:
                     item = parser(plain)
                 except UnverifiedCardLayoutError:
@@ -592,26 +658,44 @@ class TTLockClient:
                         tuple(entries),
                         complete=False,
                         limitation="eight-byte IC-card layout unverified",
+                        reason=InventoryReason.LAYOUT,
+                        diagnostic=self._inventory_diagnostic(
+                            label, index, index, plain, InventoryReason.LAYOUT
+                        ),
                     )
                 except (ValueError, RuntimeError) as exc:
+                    category = (
+                        exc.reason
+                        if isinstance(exc, InventoryParseError)
+                        else InventoryReason.LAYOUT
+                    )
+                    diagnostic = self._inventory_diagnostic(label, index, index, plain, category)
                     if entries:
                         return InventoryResult(
                             tuple(entries),
                             complete=False,
                             limitation="inventory response unrecognized",
+                            reason=category,
+                            diagnostic=diagnostic,
                         )
-                    raise TTLockError(f"{label} response was rejected or unrecognized") from exc
+                    raise InventoryError(category, "inventory", diagnostic) from None
                 if item is None:
                     return InventoryResult(
                         tuple(entries), complete=True, limitation=_CYCLIC_COVERAGE_LIMIT
                     )
                 if int.from_bytes(plain[4:6], "big") != index + 1:
                     return InventoryResult(
-                        tuple(entries), complete=False, limitation="inventory position repeated"
+                        tuple(entries),
+                        complete=False,
+                        limitation="inventory position repeated",
+                        reason=InventoryReason.CURSOR,
                     )
                 entries.append(item)
             return InventoryResult(
-                tuple(entries), complete=False, limitation="inventory safety cap reached"
+                tuple(entries),
+                complete=False,
+                limitation="inventory safety cap reached",
+                reason=InventoryReason.LIMIT,
             )
 
     async def get_fingerprints(self) -> InventoryResult:
