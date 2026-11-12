@@ -44,6 +44,26 @@ _SHORT_ID = {57, 58}
 _THIRD_DEVICE_MAC = {94, 95, 96, 97, 98, 99, 100}
 
 
+def _credential_identifier(record_type: int, payload: bytes) -> bytes | None:
+    """Preserve exact width and order; legacy decimal fields lose both context and width."""
+    if record_type == LogOperate.FR_UNLOCK_SUCCEED and len(payload) == 6:
+        return payload
+    if record_type == LogOperate.IC_UNLOCK_SUCCEED and len(payload) == 4:
+        return payload
+    if record_type != LogOperate.KEYBOARD_PASSWORD_UNLOCK or not payload:
+        return None
+    length = payload[0]
+    pin = payload[1 : length + 1]
+    if (
+        4 <= length <= 9
+        and len(pin) == length
+        and pin.isdigit()
+        and payload[length + 1 :] == b"\x00"
+    ):
+        return pin
+    return None
+
+
 def decode_log_record(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915  -- flat switch mirrors the SDK
     record_type: int,
     operate_date: dt.datetime | None,
@@ -135,4 +155,5 @@ def decode_log_record(  # noqa: PLR0913, PLR0917, PLR0912, PLR0915  -- flat swit
         accessory_battery=accessory_battery,
         start_date=start_date,
         end_date=end_date,
+        credential_identifier=_credential_identifier(record_type, payload),
     )

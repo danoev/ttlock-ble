@@ -2,7 +2,7 @@
 
 import asyncio
 import datetime as dt
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -292,6 +292,34 @@ class TestOperationLogPagination:
         client._exchange = fake_exchange  # type: ignore[method-assign]
         entries = asyncio.run(client.get_operation_log(max_entries=2))
         assert [e.password for e in entries] == ["aaaa", "bbbb"]
+
+    @pytest.mark.parametrize("incomplete", ["cap", "replay", "malformed"])
+    async def test_strict_log_rejects_incomplete_reads(self, incomplete):
+        key = make_virtual_key()
+        client = TTLockClient(key)
+        reply = _operate_log_response_frame(key, sequence=5, records=[_keypad_record("004831")])
+        if incomplete == "malformed":
+            reply = _operate_log_response_frame(key, sequence=5, records=[b"\x04"])
+        client._exchange = AsyncMock(return_value=reply)
+        with pytest.raises(TTLockError, match="read was incomplete") as error:
+            await client.get_operation_log(
+                max_entries=1 if incomplete == "cap" else 25, require_complete=True
+            )
+        assert error.value.__suppress_context__
+        assert "004831" not in str(error.value)
+
+    async def test_legacy_log_prefix_with_incomplete_notification(self):
+        key = make_virtual_key()
+        client = TTLockClient(key)
+        reply = _operate_log_response_frame(
+            key, sequence=5, records=[_keypad_record("004831"), b"\x04"]
+        )
+        end = _operate_log_response_frame(key, sequence=0, records=[])
+        client._exchange = AsyncMock(side_effect=[reply, end])
+        notified = MagicMock()
+        entries = await client.get_operation_log(on_incomplete=notified)
+        assert len(entries) == 1
+        notified.assert_called_once_with()
 
 
 def _get_lock_time_response_frame(key: VirtualKey, when: dt.datetime) -> Frame:
