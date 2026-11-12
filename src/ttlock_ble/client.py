@@ -772,11 +772,27 @@ class TTLockClient:
             raise ValueError("Unknown administrative inventory method")
         return AdministrativeInventory(summary, tuple(records))
 
+    @staticmethod
+    def _parse_operation_log_page(
+        plain: bytes, incomplete: Callable[[], None] | None
+    ) -> tuple[list[LogEntry], int]:
+        if incomplete is not None:
+            try:
+                return cmd.parse_operate_log_response(plain, strict=True)
+            except ValueError:
+                incomplete()
+        try:
+            return cmd.parse_operate_log_response(plain)
+        except ValueError:
+            raise TTLockError("Invalid operation log response") from None
+
     async def get_operation_log(
         self,
         *,
         max_entries: int | None = None,
         from_sequence: int = 0xFFFF,
+        require_complete: bool = False,
+        on_incomplete: Callable[[], None] | None = None,
     ) -> list[LogEntry]:
         """Pull on-device operation-log entries over BLE.
 
@@ -792,12 +808,24 @@ class TTLockClient:
         (oldest → newest), which means the returned list is also
         ascending; callers that want newest-first should `reversed()` it.
 
+        ``require_complete`` rejects malformed pages, caps and replay/cursor
+        termination instead of treating them as a complete read. Alternatively,
+        ``on_incomplete`` receives a credential-free notification while legacy
+        callers can still receive the safely decoded prefix.
+
         Termination: an empty page (`total_len == 0`), `last_seq == 0`,
         the cursor failing to advance, or a page composed entirely of
         records we've already seen (some firmware revisions ignore our
         seq hint and re-echo the latest entry, which is what `seen`
         guards against).
         """
+
+        def incomplete() -> None:
+            if require_complete:
+                raise TTLockError("Operation log read was incomplete") from None
+            if on_incomplete is not None:
+                on_incomplete()
+
         async with self._command_lock:
             all_entries: list[LogEntry] = []
             seen: set[int] = set()
@@ -808,24 +836,31 @@ class TTLockClient:
                     cmd.CMD_GET_OPERATE_LOG,
                     cmd.payload_operate_log_request(next_seq),
                 ).encrypt_data(self._aes_key)
-                resp = await self._exchange(frame)
-                plain = self._decrypt_response(resp, "operate_log")
-                log.debug("operate_log response: payload_bytes=%d", len(plain))
                 try:
-                    page, last_seq = cmd.parse_operate_log_response(plain)
-                except ValueError as error:
-                    raise TTLockError(f"Failed to parse operate_log response: {error}") from error
+                    resp = await self._exchange(frame)
+                    plain = self._decrypt_response(resp, "operate_log")
+                except Exception:  # noqa: BLE001 -- transport errors can include source data
+                    raise TTLockError("Operation log transport failed") from None
+                log.debug("operate_log response: payload_bytes=%d", len(plain))
+                page, last_seq = self._parse_operation_log_page(
+                    plain, incomplete if require_complete or on_incomplete is not None else None
+                )
                 log.info("Fetched %d log entr(ies), last_sequence=%d", len(page), last_seq)
                 if not page:
                     break
                 new_entries = [e for e in page if e.record_number not in seen]
+                if len(new_entries) != len(page):
+                    incomplete()
                 if not new_entries:
                     break
                 for entry in new_entries:
                     seen.add(entry.record_number)
                 all_entries.extend(new_entries)
                 if max_entries is not None and len(all_entries) >= max_entries:
+                    incomplete()
                     return all_entries[:max_entries]
+                if last_seq == next_seq:
+                    incomplete()
                 if last_seq in {0, next_seq}:
                     break
                 next_seq = last_seq

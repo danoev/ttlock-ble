@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -43,12 +43,14 @@ class LogEntry:
     record_type: LogOperate | int
     operate_date: dt.datetime | None
     lock_battery: int
-    uid: int | None = None
-    record_id: int | None = None
-    password: str | None = None
-    new_password: str | None = None
+    uid: int | None = field(default=None, repr=False)
+    record_id: int | None = field(default=None, repr=False)
+    password: str | None = field(default=None, repr=False)
+    new_password: str | None = field(default=None, repr=False)
     delete_date: dt.datetime | None = None
-    key_id: int | None = None
+    key_id: int | None = field(default=None, repr=False)
     accessory_battery: int | None = None
     start_date: dt.datetime | None = None
     end_date: dt.datetime | None = None
+    # Private wire evidence for a recognised successful unlock layout only.
+    credential_identifier: bytes | None = field(default=None, repr=False)

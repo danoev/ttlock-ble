@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from .encoding import decode_date6
 from .envelope import RESPONSE_SUCCESS, parse_response_status
 from .log_record import decode_log_record
+from .opcodes import CMD_GET_OPERATE_LOG
 
 if TYPE_CHECKING:
     from ..models import LogEntry
@@ -27,7 +28,9 @@ def payload_operate_log_request(sequence: int = 0xFFFF) -> bytes:
     return sequence.to_bytes(2, "big")
 
 
-def parse_operate_log_response(plaintext: bytes) -> tuple[list[LogEntry], int]:
+def parse_operate_log_response(
+    plaintext: bytes, *, strict: bool = False
+) -> tuple[list[LogEntry], int]:
     """Decode COMM_GET_OPERATE_LOG into `(entries, last_sequence)`.
 
     Returns the decoded `LogEntry` list and the last sequence number
@@ -35,11 +38,19 @@ def parse_operate_log_response(plaintext: bytes) -> tuple[list[LogEntry], int]:
     to fetch the next page). Returns an empty list when the lock has no
     new entries.
     """
-    _cmd_echo, status, data = parse_response_status(plaintext)
-    if status != RESPONSE_SUCCESS or len(data) < 2:
+    cmd_echo, status, data = parse_response_status(plaintext)
+    if cmd_echo != CMD_GET_OPERATE_LOG or status != RESPONSE_SUCCESS or len(data) < 2:
+        if strict:
+            raise ValueError("Operation log response not accepted")
         return [], 0
     total_len = int.from_bytes(data[:2], "big")
     if total_len == 0:
+        if strict and len(data) != 2:
+            raise ValueError("Operation log terminal layout unverified")
+        return [], 0
+    if len(data) < 5:
+        if strict:
+            raise ValueError("Operation log record missing")
         return [], 0
     sequence = int.from_bytes(data[2:4], "big")
     entries: list[LogEntry] = []
@@ -48,7 +59,9 @@ def parse_operate_log_response(plaintext: bytes) -> tuple[list[LogEntry], int]:
         rec_len = data[idx]
         idx += 1
         rec_start = idx
-        if rec_start + rec_len > len(data):
+        if rec_len < 8 or rec_start + rec_len > len(data):
+            if strict:
+                raise ValueError("Operation log record truncated")
             break
         record_type = data[idx]
         idx += 1
